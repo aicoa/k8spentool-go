@@ -57,6 +57,25 @@ K8sPenTool (Java)                    K8sPenTool-ng (Go+React)
 
 ---
 
+## 功能截图
+
+### 主界面 - 全功能 Dashboard
+![K8sPenTool-ng 主界面](images/overview.jpg)
+
+*10 个功能模块标签页，侧边栏 Target 管理 + SOCKS5 代理配置，底部实时日志*
+
+### AI 助手 - 自动化攻击分析
+![AI 助手自动分析](images/ai-analysis.jpg)
+
+*ReAct 工具调用循环：LLM 自动调用 tool → 后端执行 → 结果回灌 → 中文三段式分析结论*
+
+### CDK 战术 - 逃逸评估
+![CDK 战术逃逸评估](images/cdk-escape.jpg)
+
+*7 种 CDK 战术 API 端点：ConfigMap 凭据窃取 · Docker API 探测 · 批量逃逸风险评估 · 逃逸 Pod 生成器*
+
+---
+
 ## 核心优势
 
 ### 1. 零依赖运行，天然跨平台
