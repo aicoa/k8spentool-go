@@ -176,7 +176,11 @@ func (h *CDKHandler) CheckDockerAPI(c *gin.Context) {
 			containerInfo := []gin.H{}
 			if err == nil {
 				defer containersResp.Body.Close()
-				containersBody, _ := io.ReadAll(io.LimitReader(containersResp.Body, 32768))
+				containersBody, readErr := io.ReadAll(io.LimitReader(containersResp.Body, 32768))
+				if readErr != nil {
+					c.JSON(http.StatusOK, gin.H{"accessible": true, "port": port, "error": "failed to read containers: " + readErr.Error()})
+					return
+				}
 				var containers []map[string]interface{}
 				if json.Unmarshal(containersBody, &containers) == nil {
 					for _, cnt := range containers {

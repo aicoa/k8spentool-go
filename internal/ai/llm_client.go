@@ -229,20 +229,45 @@ func (p *OllamaProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRespo
 		return nil, err
 	}
 
-	var ollamaResp struct {
+	// Ollama returns tool_calls in message.tool_calls, with arguments as JSON object (not string).
+	// We parse the raw JSON first, then convert arguments objects to JSON strings for our ToolCall struct.
+	var ollamaRaw struct {
 		Message struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Function struct {
+					Name      string          `json:"name"`
+					Arguments json.RawMessage `json:"arguments"` // Ollama returns object, not string
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"message"`
 	}
-	if err := json.Unmarshal(respBody, &ollamaResp); err != nil {
+	if err := json.Unmarshal(respBody, &ollamaRaw); err != nil {
 		return nil, err
+	}
+
+	// Convert Ollama tool_calls (arguments as object) to OpenAI format (arguments as JSON string)
+	toolCalls := make([]ToolCall, 0, len(ollamaRaw.Message.ToolCalls))
+	for i, tc := range ollamaRaw.Message.ToolCalls {
+		argsStr := string(tc.Function.Arguments)
+		// If arguments is a JSON object (starts with '{'), it's already valid JSON string
+		// Ollama sends it as a JSON object, json.RawMessage preserves the raw bytes
+		toolCalls = append(toolCalls, ToolCall{
+			ID:   fmt.Sprintf("call_ollama_%d", i),
+			Type: "function",
+			Function: FunctionCallArg{
+				Name:      tc.Function.Name,
+				Arguments: argsStr,
+			},
+		})
 	}
 
 	return &ChatResponse{
 		Choices: []Choice{{Message: ResponseMessage{
-			Role:    ollamaResp.Message.Role,
-			Content: ollamaResp.Message.Content,
+			Role:      ollamaRaw.Message.Role,
+			Content:   ollamaRaw.Message.Content,
+			ToolCalls: toolCalls,
 		}}},
 	}, nil
 }
@@ -276,10 +301,24 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
 	}
 	url := strings.TrimRight(baseURL, "/") + "/v1/messages"
 
+	// Extract system message if present (Anthropic requires system as top-level param)
+	var systemMsg string
+	convertedMessages := convertMessagesForAnthropic(req.Messages)
+	if len(req.Messages) > 0 && req.Messages[0].Role == "system" {
+		systemMsg = req.Messages[0].Content
+		// Remove system from messages array (Anthropic handles it separately)
+		if len(convertedMessages) > 0 {
+			convertedMessages = convertedMessages[1:]
+		}
+	}
+
 	anthropicReq := map[string]interface{}{
-		"model":       p.cfg.Model,
-		"max_tokens":  p.cfg.MaxTokens,
-		"messages":    convertMessagesForAnthropic(req.Messages),
+		"model":      p.cfg.Model,
+		"max_tokens": p.cfg.MaxTokens,
+		"messages":   convertedMessages,
+	}
+	if systemMsg != "" {
+		anthropicReq["system"] = systemMsg
 	}
 	if len(req.Tools) > 0 {
 		anthropicReq["tools"] = convertToolsForAnthropic(req.Tools)
@@ -287,41 +326,116 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *ChatRequest) (*ChatRe
 
 	body, _ := json.Marshal(anthropicReq)
 	respBody, err := doHTTPRequestWithHeader(ctx, "POST", url, p.cfg.APIKey, body, map[string]string{
-		"x-api-key":      p.cfg.APIKey,
-		"anthropic-version": "2023-06-01",
+		"x-api-key":          p.cfg.APIKey,
+		"anthropic-version":  "2023-06-01",
 	})
 	if err != nil {
 		return nil, err
 	}
 
+	// Anthropic returns content as array of blocks: text, tool_use, etc.
 	var anthropicResp struct {
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text,omitempty"`
+			ID    string          `json:"id,omitempty"`
+			Name  string          `json:"name,omitempty"`
+			Input json.RawMessage `json:"input,omitempty"`
 		} `json:"content"`
+		StopReason string `json:"stop_reason"`
 	}
 	if err := json.Unmarshal(respBody, &anthropicResp); err != nil {
 		return nil, err
 	}
 
 	text := ""
+	toolCalls := make([]ToolCall, 0)
 	for _, c := range anthropicResp.Content {
 		if c.Type == "text" {
 			text += c.Text
 		}
+		if c.Type == "tool_use" {
+			// Anthropic returns input as JSON object; convert to JSON string for our ToolCall struct
+			argsStr := string(c.Input)
+			toolCalls = append(toolCalls, ToolCall{
+				ID:   c.ID,
+				Type: "function",
+				Function: FunctionCallArg{
+					Name:      c.Name,
+					Arguments: argsStr,
+				},
+			})
+		}
 	}
 	return &ChatResponse{
-		Choices: []Choice{{Message: ResponseMessage{Role: "assistant", Content: text}}},
+		Choices: []Choice{{Message: ResponseMessage{
+			Role:      "assistant",
+			Content:   text,
+			ToolCalls: toolCalls,
+		}}},
 	}, nil
 }
 
+// convertMessagesForAnthropic converts internal Message format to Anthropic's content-block format.
+// Assistant messages with tool_calls produce content as [{type:text,text:...}, {type:tool_use,...}].
+// Tool messages produce content as [{type:tool_result,tool_use_id:...,content:...}].
 func convertMessagesForAnthropic(messages []Message) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(messages))
 	for _, m := range messages {
-		result = append(result, map[string]interface{}{
-			"role":    m.Role,
-			"content": m.Content,
-		})
+		switch m.Role {
+		case "system":
+			// System messages are handled separately (top-level param), skip here
+			continue
+		case "assistant":
+			if len(m.ToolCalls) > 0 {
+				// Build content array: text block + tool_use blocks
+				contentBlocks := make([]map[string]interface{}, 0, 1+len(m.ToolCalls))
+				if m.Content != "" {
+					contentBlocks = append(contentBlocks, map[string]interface{}{
+						"type": "text",
+						"text": m.Content,
+					})
+				}
+				for _, tc := range m.ToolCalls {
+					// Parse arguments JSON string back to object for Anthropic
+					var inputObj interface{}
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &inputObj); err != nil {
+						inputObj = tc.Function.Arguments
+					}
+					contentBlocks = append(contentBlocks, map[string]interface{}{
+						"type":  "tool_use",
+						"id":    tc.ID,
+						"name":  tc.Function.Name,
+						"input": inputObj,
+					})
+				}
+				result = append(result, map[string]interface{}{
+					"role":    "assistant",
+					"content": contentBlocks,
+				})
+			} else {
+				result = append(result, map[string]interface{}{
+					"role":    "assistant",
+					"content": m.Content,
+				})
+			}
+		case "tool":
+			// Anthropic expects tool_result content blocks with tool_use_id
+			result = append(result, map[string]interface{}{
+				"role": "user",
+				"content": []map[string]interface{}{{
+					"type":         "tool_result",
+					"tool_use_id":  m.ToolCallID,
+					"content":      m.Content,
+				}},
+			})
+		default:
+			// user messages
+			result = append(result, map[string]interface{}{
+				"role":    m.Role,
+				"content": m.Content,
+			})
+		}
 	}
 	return result
 }

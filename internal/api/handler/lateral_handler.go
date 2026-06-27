@@ -24,7 +24,9 @@ func (h *LateralHandler) buildClient(c *gin.Context) (*kubectl.Client, error) {
 		Password   string `json:"password"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		return nil, err
+	}
 	server := "https://" + req.TargetHost + ":6443"
 	if req.Token != "" {
 		return kubectl.NewClient(server, req.Token, req.SkipTLS)

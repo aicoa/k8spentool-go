@@ -322,6 +322,10 @@ func (h *KubectlHandler) GetImages(c *gin.Context) {
 		return
 	}
 	pods, err := listPods(client, "")
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	images := make([]gin.H, 0)
 	for _, p := range pods {
 		images = append(images, gin.H{"namespace": p.Namespace, "pod": p.Name, "images": p.Images})

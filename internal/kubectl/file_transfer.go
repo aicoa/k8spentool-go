@@ -178,7 +178,10 @@ func (c *Client) UploadBytes(ctx context.Context, namespace, podName, containerN
 	// Make executable if it looks like a binary
 	if strings.HasSuffix(destPath, ".bin") || strings.HasSuffix(destPath, ".sh") {
 		chmodCmd := []string{"chmod", "+x", destPath}
-		c.ExecInPodResult(ctx, namespace, podName, containerName, chmodCmd)
+		if _, chmodErr := c.ExecInPodResult(ctx, namespace, podName, containerName, chmodCmd); chmodErr != nil {
+			// chmod failure is non-fatal; file is uploaded but may lack exec permission
+			return fmt.Sprintf("Uploaded %d bytes to %s/%s:%s (chmod failed: %v)", len(data), namespace, podName, destPath, chmodErr), nil
+		}
 	}
 
 	return fmt.Sprintf("Uploaded %d bytes to %s/%s:%s", len(data), namespace, podName, destPath), nil

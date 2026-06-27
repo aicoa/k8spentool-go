@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Button, Card, Input, Space, List, Typography, Tag, Alert, Select, message, Collapse } from 'antd';
+import { Button, Card, Input, Space, List, Typography, Tag, Select, message, Collapse } from 'antd';
 import { RobotOutlined, UserOutlined, ToolOutlined, SettingOutlined, ApiOutlined } from '@ant-design/icons';
 import { api } from '../services/api';
 
@@ -64,7 +64,7 @@ export default function AITab({ getAuth, addLog, host }: Props) {
     setInput('');
 
     try {
-      if (userMsg.toLowerCase().includes('plan') && userMsg.length < 20) {
+      if (userMsg.toLowerCase().includes('plan') || userMsg.toLowerCase().includes('attack plan') || userMsg.includes('攻击计划')) {
         const r = await api.ai.generatePlan(sessionId, 'Complete penetration test of target K8s cluster');
         setPlan(r);
         setMessages((prev) => [...prev, { role: 'assistant', content: `Attack plan generated: ${r.steps?.length || 0} steps. Review and approve each step to proceed.` }]);

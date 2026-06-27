@@ -9,6 +9,7 @@ export default function KubectlTab({ getAuth, addLog }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [customCmd, setCustomCmd] = useState('get namespaces');
+  const [applyYaml, setApplyYaml] = useState('');
 
   const run = async (fn: () => Promise<any>, label: string) => {
     setLoading(true); setResult(null);
@@ -51,18 +52,16 @@ export default function KubectlTab({ getAuth, addLog }: Props) {
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
             <Input.TextArea placeholder="粘贴 YAML (或从持久化/CDK标签页复制)" rows={4} style={{ width: 280, fontSize: 10, fontFamily: 'monospace' }}
-              onChange={(e) => { /* store YAML for apply */ (window as any).__applyYaml = e.target.value; }} />
+              value={applyYaml} onChange={(e) => setApplyYaml(e.target.value)} />
           </Space>
           <Space>
             <Button danger onClick={() => {
-              const y = (window as any).__applyYaml;
-              if (!y) { addLog('[-] 请先粘贴 YAML'); return; }
-              run(() => api.kubectl.apply({ ...t, yaml: y }), 'kubectl apply');
+              if (!applyYaml) { addLog('[-] 请先粘贴 YAML'); return; }
+              run(() => api.kubectl.apply({ ...t, yaml: applyYaml }), 'kubectl apply');
             }}>Apply YAML</Button>
             <Button onClick={() => {
-              const y = (window as any).__applyYaml;
-              if (!y) { addLog('[-] 请先粘贴 YAML'); return; }
-              run(() => api.kubectl.del({ ...t, yaml: y }), 'kubectl delete');
+              if (!applyYaml) { addLog('[-] 请先粘贴 YAML'); return; }
+              run(() => api.kubectl.del({ ...t, yaml: applyYaml }), 'kubectl delete');
             }}>删除资源</Button>
           </Space>
           <span style={{ fontSize: 10, color: '#888' }}>从持久化或CDK标签页复制YAML，粘贴后点击Apply部署</span>

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Button, Card, Input, Select, Space, Tag, Table, Typography, Alert } from 'antd';
+import { Button, Card, Input, Select, Space, Tag, Table, Typography } from 'antd';
 import { api, targetParams } from '../services/api';
 import ResultView from '../components/ResultView';
 
@@ -84,7 +84,7 @@ export default function EscapeTab({ getAuth, addLog }: Props) {
 
       {/* Manual Escape Checks */}
       <Card title="Escape Condition Checks" size="small">
-        <Button onClick={async () => { const r = await api.escape.checks(); setChecks(r.checks); addLog('Loaded escape checks'); }}>加载手动检测命令</Button>
+        <Button onClick={async () => { try { const r = await api.escape.checks(); setChecks(r.checks); addLog('Loaded escape checks'); } catch(e) { addLog('[-] Failed to load escape checks: ' + e); } }}>加载手动检测命令</Button>
         <div style={{ maxHeight: 250, overflow: 'auto', marginTop: 8 }}>
           {(checks as any[]).map((c, i) => (
             <div key={i} style={{ fontSize: 11, padding: 4, borderBottom: '1px solid #eee' }}>
@@ -114,7 +114,7 @@ export default function EscapeTab({ getAuth, addLog }: Props) {
         </Space>
       </Card>
       <Card title="Kernel Vulnerabilities" size="small">
-        <Button onClick={async () => { const r = await api.escape.kernelVulns(); setVulns(r.vulnerabilities); addLog('Loaded kernel vulns'); }}>加载 Vulnerabilities</Button>
+        <Button onClick={async () => { try { const r = await api.escape.kernelVulns(); setVulns(r.vulnerabilities); addLog('Loaded kernel vulns'); } catch(e) { addLog('[-] Failed to load kernel vulns: ' + e); } }}>加载 Vulnerabilities</Button>
         <div style={{ maxHeight: 200, overflow: 'auto', marginTop: 8 }}>
           {(vulns as any[]).map((v, i) => (
             <div key={i} style={{ fontSize: 11, padding: 4 }}><b>{v.cve}</b> - {v.name} ({v.affected})</div>

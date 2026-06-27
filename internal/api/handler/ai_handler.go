@@ -272,8 +272,8 @@ func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools [
 	messages := buildLLMMessages(session)
 	session.mu.RUnlock()
 
-	// 若历史里没有 system 之外的轮次，确保用户消息已在（buildLLMMessages 已含 history）
-	_ = userMsg
+	// buildLLMMessages already includes all history; userMsg was appended to session.History before this call.
+	_ = userMsg // kept for signature compatibility; actual messages come from buildLLMMessages(session)
 
 	traces := []ai.ToolTrace{}
 	safety := ai.DefaultSafetyConfig()
@@ -310,19 +310,20 @@ func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools [
 
 		// 逐个执行工具，结果以 tool 角色回灌
 		for _, tc := range choice.Message.ToolCalls {
-			// 安全闸门：destructive 工具不自动执行
-			guard := safety.CheckAction(tc.Function.Name, "", engine.RiskHigh)
+			// 安全闸门：使用工具的实际风险级别，而非硬编码 RiskHigh
+			riskLevel := ai.GetToolRiskLevel(tc.Function.Name)
+			guard := safety.CheckAction(tc.Function.Name, "", riskLevel)
 			var res ai.DispatchResult
 			if guard.NeedApproval {
 				res = ai.DispatchResult{
-					Output: "⚠️ 该操作为破坏性动作（" + tc.Function.Name + "），需人工批准后方可执行。本次未执行。可给出操作建议供用户手动进行。",
+					Output: "⚠️ 该操作为破坏性动作（" + tc.Function.Name + "），需人工批准后方可执行。请在 Attack Plan 中 Approve 对应步骤后重试。",
 					Trace:  ai.ToolTrace{Tool: tc.Function.Name, Args: tc.Function.Arguments, ResultPreview: "需人工批准", Status: "needs_approval"},
 				}
 			} else {
 				res = ai.Dispatch(ctx, tc, session.Auth)
 			}
 			traces = append(traces, res.Trace)
-			log.Printf("[AI] tool %s status=%s", tc.Function.Name, res.Trace.Status)
+			log.Printf("[AI] tool %s status=%s risk=%s", tc.Function.Name, res.Trace.Status, riskLevel)
 
 			messages = append(messages, ai.Message{
 				Role:       "tool",

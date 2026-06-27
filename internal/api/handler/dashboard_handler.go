@@ -372,11 +372,14 @@ func (h *DashboardHandler) getAttackSteps(targetHost string) []gin.H {
 // ==================== Step 3: Extract Dashboard SA Token via API ====================
 
 func (h *DashboardHandler) ExtractToken(c *gin.Context) {
-	client, _, err := h.buildClient(c)
+	client, server, err := h.buildClient(c)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
+	// Extract target host from the built server URL (e.g. "https://10.0.0.1:6443")
+	targetHost := strings.TrimPrefix(server, "https://")
+	targetHost = strings.TrimSuffix(targetHost, ":6443")
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
@@ -421,7 +424,7 @@ func (h *DashboardHandler) ExtractToken(c *gin.Context) {
 				// Validate token by testing on API server
 				tokenValid := false
 				testClient, testErr := kubectl.NewClient(
-					fmt.Sprintf("https://%s:6443", c.GetString("target_host")),
+					fmt.Sprintf("https://%s:6443", targetHost),
 					tokenStr,
 					true,
 				)

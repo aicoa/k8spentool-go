@@ -701,9 +701,8 @@ func tryParseItems(body []byte) (string, []gin.H) {
 			meta, _ := obj["metadata"].(map[string]interface{})
 			status, _ := obj["status"].(map[string]interface{})
 			name, _ := meta["name"].(string)
-			phase, _ := status["phase"].(string)
+			_ = status["phase"] // phase available for future use
 			result = append(result, gin.H{"namespace": "", "name": name, "type": "Namespace", "cluster_ip": "", "ports": []string{}})
-			_ = phase
 		}
 		default:
 			return "", nil

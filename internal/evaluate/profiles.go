@@ -113,6 +113,17 @@ func (e *Engine) extendedProfile() *Profile {
 }
 
 // Check implementors
+//
+// NOTE: The following checks (checkIsContainer, checkIsK8sPod, checkCapabilities, checkPrivileged,
+// checkHostMounts, checkDockerSocket, checkSAToken, checkSensitiveFiles) operate on the LOCAL
+// filesystem of the machine running K8sPenTool-ng. They are designed for scenarios where the
+// tool is deployed inside a container on the target cluster (e.g. via kubectl cp + exec).
+// When running the tool from an external workstation, these checks reflect the workstation's
+// environment, NOT the target cluster. Use the exec_list_pods + exec_command AI tools or the
+// Exec Tab to run these checks remotely inside target pods.
+//
+// Network-based checks (checkK8sAnonymous, checkKubeletAccess, checkEtcdAccess, checkK8sAPIAccess,
+// checkCloudMetadata) correctly use TargetInfo.Host to probe the remote target.
 
 func checkIsContainer(ctx context.Context, t *TargetInfo) (*CheckResult, error) {
 	found := false

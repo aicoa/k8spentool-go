@@ -34,9 +34,36 @@ func DefaultSafetyConfig() *SafetyConfig {
 var destructiveToolNames = map[string]bool{
 	"persist_create_admin_sa": true,
 	"persist_cronjob":         true,
-	"persist_daemonset":       true,
 	"escape_privileged":       true,
 	"kubectl_exec":            true, // can run arbitrary kubectl commands including delete/apply
+}
+
+// toolRiskLevels maps each tool to its actual risk level, used by the safety gate.
+var toolRiskLevels = map[string]engine.RiskLevel{
+	"info_port_scan":           engine.RiskInfo,
+	"info_run_evaluate":        engine.RiskInfo,
+	"access_apiserver":         engine.RiskLow,
+	"access_kubelet":           engine.RiskMedium,
+	"access_etcd_check":        engine.RiskMedium,
+	"access_dashboard":         engine.RiskMedium,
+	"exec_list_pods":           engine.RiskLow,
+	"exec_command":             engine.RiskMedium,
+	"lateral_list_secrets":     engine.RiskMedium,
+	"lateral_view_secret":      engine.RiskHigh,
+	"lateral_discover_services": engine.RiskLow,
+	"persist_create_admin_sa":  engine.RiskCritical,
+	"persist_cronjob":          engine.RiskCritical,
+	"escape_check":             engine.RiskInfo,
+	"escape_privileged":        engine.RiskCritical,
+	"kubectl_exec":             engine.RiskHigh,
+}
+
+// GetToolRiskLevel returns the risk level for a tool, defaulting to RiskMedium.
+func GetToolRiskLevel(toolName string) engine.RiskLevel {
+	if rl, ok := toolRiskLevels[toolName]; ok {
+		return rl
+	}
+	return engine.RiskMedium
 }
 
 type GuardResult struct {

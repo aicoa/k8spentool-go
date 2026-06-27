@@ -41,7 +41,10 @@ func (h *InfoHandler) RunProfile(c *gin.Context) {
 		TimeoutSec int    `json:"timeout_sec"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}

@@ -18,6 +18,9 @@ export default function ExecTab({ getAuth, addLog }: Props) {
   const [lport, setLport] = useState('4444');
   const [shellType, setShellType] = useState('bash');
   const [backdoorPod, setBackdoorPod] = useState('backdoor-pod');
+  // File upload paths stored in React state
+  const [uploadLocalPath, setUploadLocalPath] = useState('');
+  const [uploadRemotePath, setUploadRemotePath] = useState('');
   // Pod list cache — persists across exec calls
   const [podListCache, setPodListCache] = useState<any[] | null>(null);
 
@@ -123,17 +126,15 @@ export default function ExecTab({ getAuth, addLog }: Props) {
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
             <Input placeholder="本地文件路径" style={{ width: 200 }}
-              onChange={(e) => { (window as any).__uploadLocalPath = e.target.value; }} />
+              onChange={(e) => setUploadLocalPath(e.target.value)} />
             <Input placeholder="Pod内路径 (如 /tmp/chisel)" style={{ width: 180 }}
-              onChange={(e) => { (window as any).__uploadRemotePath = e.target.value; }} />
+              onChange={(e) => setUploadRemotePath(e.target.value)} />
           </Space>
           <Space>
             <Button type="primary" onClick={() => {
-              const localPath = (window as any).__uploadLocalPath;
-              const remotePath = (window as any).__uploadRemotePath;
-              if (!localPath || !remotePath) { addLog('[-] 请填写本地和远程路径'); return; }
+              if (!uploadLocalPath || !uploadRemotePath) { addLog('[-] 请填写本地和远程路径'); return; }
               if (!pod) { addLog('[-] 请先选择Pod'); return; }
-              run(() => api.exec.uploadFile({ ...t, namespace: ns, pod_name: pod, local_path: localPath, remote_path: remotePath }), `Upload to ${pod}`);
+              run(() => api.exec.uploadFile({ ...t, namespace: ns, pod_name: pod, local_path: uploadLocalPath, remote_path: uploadRemotePath }), `Upload to ${pod}`);
             }}>
               上传文件到 Pod
             </Button>
