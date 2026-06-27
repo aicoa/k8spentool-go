@@ -1,0 +1,1385 @@
+openapi: "3.0.3"
+info:
+  title: K8sPenTool-ng API
+  description: |
+    K8sPenTool-ng - Kubernetes Container Penetration Testing Platform
+
+    Integrates CDK (Container Defense Kit) exploits with AI-driven attack chain automation.
+    All endpoints use JSON request/response. Real-time events via WebSocket at `/api/v1/ws`.
+  version: "2.0.0"
+  contact:
+    name: K8sPenTool Team
+    url: https://github.com/trymonoly/K8sPenTool-ng
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development server
+
+tags:
+  - name: Target
+    description: Target configuration and session management
+  - name: Info
+    description: Information gathering and reconnaissance
+  - name: Access
+    description: Initial access to K8s components
+  - name: Exec
+    description: Command execution in pods/containers
+  - name: Persist
+    description: Persistence and backdoor deployment
+  - name: Escape
+    description: Container escape and privilege escalation
+  - name: Lateral
+    description: Lateral movement and credential access
+  - name: Kubectl
+    description: kubectl command operations
+  - name: AI
+    description: AI agent automation sessions
+
+paths:
+  # Health
+  /health:
+    get:
+      tags: [Target]
+      summary: Health check
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  # Target
+  /targets:
+    post:
+      tags: [Target]
+      summary: Create a new target session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTargetRequest'
+      responses:
+        '201':
+          description: Target created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+    get:
+      tags: [Target]
+      summary: List all targets
+      responses:
+        '200':
+          description: List of targets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Target'
+
+  /targets/{id}:
+    get:
+      tags: [Target]
+      summary: Get target details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Target details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+    delete:
+      tags: [Target]
+      summary: Delete a target
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Target deleted
+
+  # Info
+  /info/profiles:
+    get:
+      tags: [Info]
+      summary: List evaluation profiles
+      responses:
+        '200':
+          description: Available profiles
+
+  /info/profiles/{id}/run:
+    post:
+      tags: [Info]
+      summary: Run an evaluation profile
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [basic, extended, full]
+      responses:
+        '200':
+          description: Evaluation started
+
+  /info/port-scan:
+    post:
+      tags: [Info]
+      summary: Scan K8s ports on target
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host:
+                  type: string
+                ports:
+                  type: string
+              required: [host]
+      responses:
+        '200':
+          description: Scan results
+
+  /info/decode-capabilities:
+    post:
+      tags: [Info]
+      summary: Decode Linux capability hex value
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hex:
+                  type: string
+              required: [hex]
+      responses:
+        '200':
+          description: Decoded capabilities
+
+  /info/env-check-cmds:
+    get:
+      tags: [Info]
+      summary: Get environment detection commands
+      responses:
+        '200':
+          description: List of commands
+
+  /info/priv-check-cmds:
+    get:
+      tags: [Info]
+      summary: Get privilege check commands
+      responses:
+        '200':
+          description: List of commands
+
+  /info/sa-token-cmds:
+    get:
+      tags: [Info]
+      summary: Get SA token extraction commands
+      responses:
+        '200':
+          description: List of commands
+
+  /info/port-reference:
+    get:
+      tags: [Info]
+      summary: Get K8s port reference table
+      responses:
+        '200':
+          description: Port reference data
+
+  # Access - APIServer
+  /access/api-server:
+    post:
+      tags: [Access]
+      summary: Check APIServer access
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccessRequest'
+      responses:
+        '200':
+          description: Access check result
+
+  /access/api-server/insecure:
+    post:
+      tags: [Access]
+      summary: Check APIServer insecure port (8080)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccessRequest'
+      responses:
+        '200':
+          description: Port check result
+
+  /access/api-server/request:
+    post:
+      tags: [Access]
+      summary: Send custom request to APIServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomAPIRequest'
+      responses:
+        '200':
+          description: API response
+
+  # Access - Kubelet
+  /access/kubelet:
+    post:
+      tags: [Access]
+      summary: Check Kubelet (10250) access
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccessRequest'
+      responses:
+        '200':
+          description: Access check result
+
+  /access/kubelet/exec:
+    post:
+      tags: [Access]
+      summary: Execute command via Kubelet API
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubeletExecRequest'
+      responses:
+        '200':
+          description: Command output
+
+  # Access - Etcd
+  /access/etcd/check:
+    post:
+      tags: [Access]
+      summary: Check Etcd (2379) unauthorized access
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                timeout_sec:
+                  type: integer
+              required: [target_host]
+      responses:
+        '200':
+          description: Etcd access result
+
+  /access/etcd/keys:
+    post:
+      tags: [Access]
+      summary: List all Etcd keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: Etcd keys
+
+  /access/etcd/read:
+    post:
+      tags: [Access]
+      summary: Read a specific Etcd key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                key:
+                  type: string
+              required: [target_host, key]
+      responses:
+        '200':
+          description: Key value
+
+  # Access - Dashboard
+  /access/dashboard:
+    post:
+      tags: [Access]
+      summary: Check K8s Dashboard access
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                port:
+                  type: integer
+                use_https:
+                  type: boolean
+              required: [target_host]
+      responses:
+        '200':
+          description: Dashboard check result
+
+  # Access - Kubeconfig
+  /access/kubeconfig/parse:
+    post:
+      tags: [Access]
+      summary: Parse kubeconfig content
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content:
+                  type: string
+              required: [content]
+      responses:
+        '200':
+          description: Parsed kubeconfig info
+
+  # Exec
+  /exec/api-server/list-pods:
+    post:
+      tags: [Exec]
+      summary: List pods via APIServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExecListRequest'
+      responses:
+        '200':
+          description: Pod list
+
+  /exec/api-server/exec:
+    post:
+      tags: [Exec]
+      summary: Execute command in pod via APIServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PodExecRequest'
+      responses:
+        '200':
+          description: Command output
+
+  /exec/api-server/enum-sa-tokens:
+    post:
+      tags: [Exec]
+      summary: Enumerate service account tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                namespace:
+                  type: string
+                token:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: SA tokens
+
+  /exec/kubelet/list-pods:
+    post:
+      tags: [Exec]
+      summary: List pods via Kubelet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: Pod list from Kubelet
+
+  /exec/kubelet/exec:
+    post:
+      tags: [Exec]
+      summary: Execute command via Kubelet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubeletExecRequest'
+      responses:
+        '200':
+          description: Command output
+
+  /exec/backdoor/generate-yaml:
+    post:
+      tags: [Exec]
+      summary: Generate backdoor pod YAML
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BackdoorConfig'
+      responses:
+        '200':
+          description: Backdoor YAML
+
+  /exec/rbac/check:
+    post:
+      tags: [Exec]
+      summary: Check RBAC permissions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                token:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: RBAC check result
+
+  /exec/reverse-shell/generate:
+    post:
+      tags: [Exec]
+      summary: Generate reverse shell payload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lhost:
+                  type: string
+                lport:
+                  type: string
+                type:
+                  type: string
+                  enum: [bash, python, nc, perl, php]
+              required: [lhost, lport]
+      responses:
+        '200':
+          description: Reverse shell payload
+
+  # Persist
+  /persist/service-account:
+    post:
+      tags: [Persist]
+      summary: Create high-privilege ServiceAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminSARequest'
+      responses:
+        '200':
+          description: SA creation result
+
+  /persist/service-account/token:
+    post:
+      tags: [Persist]
+      summary: Get ServiceAccount token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminSARequest'
+      responses:
+        '200':
+          description: SA token
+
+  /persist/cronjob:
+    post:
+      tags: [Persist]
+      summary: Deploy CronJob backdoor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CronJobRequest'
+      responses:
+        '200':
+          description: CronJob deployment result
+
+  /persist/daemonset:
+    post:
+      tags: [Persist]
+      summary: Deploy DaemonSet backdoor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DaemonSetRequest'
+      responses:
+        '200':
+          description: DaemonSet deployment result
+
+  /persist/kubeconfig:
+    post:
+      tags: [Persist]
+      summary: Generate shadow kubeconfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                server:
+                  type: string
+                cluster:
+                  type: string
+                token:
+                  type: string
+              required: [server, token]
+      responses:
+        '200':
+          description: Generated kubeconfig
+
+  /persist/host-crontab:
+    post:
+      tags: [Persist]
+      summary: Generate host persistence commands
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lhost:
+                  type: string
+                lport:
+                  type: string
+              required: [lhost, lport]
+      responses:
+        '200':
+          description: Host persistence commands
+
+  # Escape
+  /escape/checks:
+    get:
+      tags: [Escape]
+      summary: Get escape condition checks
+      responses:
+        '200':
+          description: Escape check commands
+
+  /escape/privileged:
+    post:
+      tags: [Escape]
+      summary: Privileged container escape
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                namespace:
+                  type: string
+                pod_name:
+                  type: string
+                lhost:
+                  type: string
+                lport:
+                  type: string
+              required: [target_host, pod_name, lhost, lport]
+      responses:
+        '200':
+          description: Escape commands
+
+  /escape/mount:
+    post:
+      tags: [Escape]
+      summary: Mount-based container escape
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                escape_type:
+                  type: string
+                  enum: [chroot, crontab, docker.sock, procfs]
+                lhost:
+                  type: string
+                lport:
+                  type: string
+              required: [escape_type, lhost, lport]
+      responses:
+        '200':
+          description: Escape commands
+
+  /escape/kernel-vulns:
+    get:
+      tags: [Escape]
+      summary: Get kernel vulnerability reference
+      responses:
+        '200':
+          description: Kernel vulnerability list
+
+  # Lateral
+  /lateral/secrets:
+    post:
+      tags: [Lateral]
+      summary: List secrets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                namespace:
+                  type: string
+                token:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: Secret list
+
+  /lateral/secrets/view:
+    post:
+      tags: [Lateral]
+      summary: View and decode a secret
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                namespace:
+                  type: string
+                secret_name:
+                  type: string
+                token:
+                  type: string
+              required: [target_host, namespace, secret_name]
+      responses:
+        '200':
+          description: Decoded secret data
+
+  /lateral/services:
+    post:
+      tags: [Lateral]
+      summary: List services
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                namespace:
+                  type: string
+                token:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: Service list
+
+  /lateral/endpoints:
+    post:
+      tags: [Lateral]
+      summary: List endpoints
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                token:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: Endpoint list
+
+  /lateral/nodes:
+    post:
+      tags: [Lateral]
+      summary: List nodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                token:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: Node list
+
+  /lateral/network-policies:
+    post:
+      tags: [Lateral]
+      summary: List network policies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                token:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: Network policy list
+
+  /lateral/taints:
+    post:
+      tags: [Lateral]
+      summary: Show node taints
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                token:
+                  type: string
+              required: [target_host]
+      responses:
+        '200':
+          description: Node taints
+
+  /lateral/taint-pod:
+    post:
+      tags: [Lateral]
+      summary: Generate taint toleration pod YAML
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                node_name:
+                  type: string
+                image:
+                  type: string
+                host_mount:
+                  type: boolean
+              required: [target_host, node_name]
+      responses:
+        '200':
+          description: Taint pod YAML
+
+  # Kubectl
+  /kubectl/exec:
+    post:
+      tags: [Kubectl]
+      summary: Execute arbitrary kubectl command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlCommandRequest'
+      responses:
+        '200':
+          description: Command output
+
+  /kubectl/get-pods:
+    post:
+      tags: [Kubectl]
+      summary: kubectl get pods
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Pod list
+
+  /kubectl/get-nodes:
+    post:
+      tags: [Kubectl]
+      summary: kubectl get nodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Node list
+
+  /kubectl/get-services:
+    post:
+      tags: [Kubectl]
+      summary: kubectl get services
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Service list
+
+  /kubectl/get-secrets:
+    post:
+      tags: [Kubectl]
+      summary: kubectl get secrets
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Secret list
+
+  /kubectl/apply:
+    post:
+      tags: [Kubectl]
+      summary: kubectl apply YAML
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                token:
+                  type: string
+                yaml:
+                  type: string
+              required: [target_host, yaml]
+      responses:
+        '200':
+          description: Apply result
+
+  /kubectl/delete:
+    post:
+      tags: [Kubectl]
+      summary: kubectl delete resource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_host:
+                  type: string
+                token:
+                  type: string
+                resource:
+                  type: string
+                name:
+                  type: string
+                namespace:
+                  type: string
+              required: [target_host, resource, name]
+      responses:
+        '200':
+          description: Delete result
+
+  # AI
+  /ai/sessions:
+    post:
+      tags: [AI]
+      summary: Create AI session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_id:
+                  type: string
+              required: [target_id]
+      responses:
+        '201':
+          description: Session created
+    get:
+      tags: [AI]
+      summary: List AI sessions
+      responses:
+        '200':
+          description: Session list
+
+  /ai/sessions/{id}:
+    get:
+      tags: [AI]
+      summary: Get AI session details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session details
+
+  /ai/sessions/{id}/chat:
+    post:
+      tags: [AI]
+      summary: Chat with AI agent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message:
+                  type: string
+              required: [message]
+      responses:
+        '200':
+          description: AI response
+
+  /ai/sessions/{id}/plan:
+    post:
+      tags: [AI]
+      summary: Generate attack plan
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                objective:
+                  type: string
+      responses:
+        '200':
+          description: Attack plan
+    get:
+      tags: [AI]
+      summary: Get current attack plan
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current plan
+
+  /ai/sessions/{id}/approve:
+    post:
+      tags: [AI]
+      summary: Approve a pending step
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                step_index:
+                  type: integer
+      responses:
+        '200':
+          description: Step approved
+
+  /ai/sessions/{id}/stop:
+    post:
+      tags: [AI]
+      summary: Stop AI session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session stopped
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+
+    Target:
+      type: object
+      properties:
+        id:
+          type: string
+        host:
+          type: string
+        port:
+          type: integer
+        token:
+          type: string
+        auth_type:
+          type: string
+          enum: [none, token, cert, kubeconfig]
+        skip_tls:
+          type: boolean
+        timeout_sec:
+          type: integer
+        kubeconfig:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+
+    CreateTargetRequest:
+      type: object
+      required: [host]
+      properties:
+        host:
+          type: string
+        port:
+          type: integer
+          default: 6443
+        token:
+          type: string
+        auth_type:
+          type: string
+          default: none
+        skip_tls:
+          type: boolean
+          default: true
+        timeout_sec:
+          type: integer
+          default: 10
+        username:
+          type: string
+        password:
+          type: string
+        kubeconfig:
+          type: string
+
+    AccessRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        token:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    CustomAPIRequest:
+      type: object
+      required: [target_host, path]
+      properties:
+        target_host:
+          type: string
+        path:
+          type: string
+        method:
+          type: string
+          enum: [GET, POST, PUT, DELETE]
+        token:
+          type: string
+        body:
+          type: string
+        content_type:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    KubeletExecRequest:
+      type: object
+      required: [target_host, pod_name, command]
+      properties:
+        target_host:
+          type: string
+        namespace:
+          type: string
+        pod_name:
+          type: string
+        container_name:
+          type: string
+        command:
+          type: string
+        token:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    ExecListRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        namespace:
+          type: string
+        token:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    PodExecRequest:
+      type: object
+      required: [target_host, pod_name, command]
+      properties:
+        target_host:
+          type: string
+        namespace:
+          type: string
+        pod_name:
+          type: string
+        container_name:
+          type: string
+        command:
+          type: string
+        token:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    BackdoorConfig:
+      type: object
+      properties:
+        image:
+          type: string
+        mount_path:
+          type: string
+        node_name:
+          type: string
+        lhost:
+          type: string
+        lport:
+          type: string
+        pod_name:
+          type: string
+        ssh_pub_key:
+          type: string
+
+    AdminSARequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        namespace:
+          type: string
+        sa_name:
+          type: string
+        binding_name:
+          type: string
+        token:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    CronJobRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        image:
+          type: string
+        schedule:
+          type: string
+        command:
+          type: string
+        token:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    DaemonSetRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        image:
+          type: string
+        mount_path:
+          type: string
+        command:
+          type: string
+        token:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    KubectlRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        token:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        skip_tls:
+          type: boolean
+        kubeconfig_path:
+          type: string
+        kubeconfig:
+          type: string
+        timeout_sec:
+          type: integer
+
+    KubectlCommandRequest:
+      allOf:
+        - $ref: '#/components/schemas/KubectlRequest'
+        - type: object
+          required: [command]
+          properties:
+            command:
+              type: string
