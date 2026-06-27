@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
-import { Button, Card, Input, Space, List, Typography, Tag, Alert } from 'antd';
-import { RobotOutlined, UserOutlined, ToolOutlined } from '@ant-design/icons';
+import React, { useState, useEffect } from 'react';
+import { Button, Card, Input, Space, List, Typography, Tag, Alert, Select, message, Collapse } from 'antd';
+import { RobotOutlined, UserOutlined, ToolOutlined, SettingOutlined, ApiOutlined } from '@ant-design/icons';
 import { api } from '../services/api';
+
+const { Text } = Typography;
 
 interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; host: string; }
 
@@ -11,6 +13,37 @@ export default function AITab({ getAuth, addLog, host }: Props) {
   const [input, setInput] = useState('');
   const [plan, setPlan] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+
+  // LLM config
+  const [llmProvider, setLlmProvider] = useState('openai');
+  const [llmModel, setLlmModel] = useState('');
+  const [llmApiKey, setLlmApiKey] = useState('');
+  const [llmBaseURL, setLlmBaseURL] = useState('');
+  const [llmSaving, setLlmSaving] = useState(false);
+
+  useEffect(() => {
+    api.ai.getConfig().then((cfg: any) => {
+      if (cfg?.provider) setLlmProvider(cfg.provider);
+      if (cfg?.model) setLlmModel(cfg.model);
+      if (cfg?.base_url) setLlmBaseURL(cfg.base_url);
+    }).catch(() => {});
+  }, []);
+
+  const saveLLMConfig = async () => {
+    setLlmSaving(true);
+    try {
+      await api.ai.updateConfig({
+        provider: llmProvider,
+        model: llmModel || undefined,
+        api_key: llmApiKey || undefined,
+        base_url: llmBaseURL || undefined,
+      });
+      setLlmApiKey('');
+      message.success('LLM 配置已保存');
+      addLog(`[AI] LLM config updated: ${llmProvider}/${llmModel || 'default'}`);
+    } catch (e) { message.error('保存失败: ' + e); }
+    finally { setLlmSaving(false); }
+  };
 
   const auth = getAuth();
 
@@ -59,8 +92,46 @@ export default function AITab({ getAuth, addLog, host }: Props) {
   };
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, height: 'calc(100vh - 300px)' }}>
-      <Card title={<span><RobotOutlined /> AI Chat</span>} size="small" style={{ display: 'flex', flexDirection: 'column' }}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, height: 'calc(100vh - 300px)', overflow: 'auto' }}>
+      {/* LLM Config */}
+      <Collapse ghost size="small" style={{ flexShrink: 0 }}
+        items={[{
+          key: 'llm-config',
+          label: <span style={{ fontSize: 12 }}><SettingOutlined /> LLM 配置</span>,
+          children: (
+            <Space direction="vertical" style={{ width: '100%' }} size={4}>
+              <Space size={8} wrap>
+                <Select value={llmProvider} onChange={setLlmProvider} size="small" style={{ width: 110 }}
+                  options={[
+                    { value: 'openai', label: 'OpenAI 兼容 (推荐)' },
+                    { value: 'ollama', label: 'Ollama (本地)' },
+                    { value: 'anthropic', label: 'Anthropic/Claude' },
+                    { value: 'custom', label: '自定义' },
+                  ]} />
+                <Input size="small" placeholder="模型名称，如 deepseek-v4-pro" value={llmModel}
+                  onChange={(e) => setLlmModel(e.target.value)} style={{ width: 180 }} />
+              </Space>
+              <Space size={8} wrap>
+                <Input.Password size="small" placeholder="API Key (留空不修改)" value={llmApiKey}
+                  onChange={(e) => setLlmApiKey(e.target.value)} style={{ width: 280 }}
+                  prefix={<ApiOutlined />} />
+                <Input size="small" placeholder="Base URL (如 https://api.deepseek.com/v1)" value={llmBaseURL}
+                  onChange={(e) => setLlmBaseURL(e.target.value)} style={{ width: 280 }} />
+              </Space>
+              <Button size="small" type="primary" onClick={saveLLMConfig} loading={llmSaving}
+                disabled={!llmProvider && !llmModel && !llmApiKey && !llmBaseURL}>
+                保存配置
+              </Button>
+              <Text type="secondary" style={{ fontSize: 10 }}>
+                支持 OpenAI 兼容 API (DeepSeek/GPT等) / Ollama 本地模型 / Anthropic Claude / 自定义。API Key 保存在服务端，不会回显。
+              </Text>
+            </Space>
+          ),
+        }]}
+      />
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, flex: 1, minHeight: 0 }}>
+        <Card title={<span><RobotOutlined /> AI Chat</span>} size="small" style={{ display: 'flex', flexDirection: 'column' }}
         extra={!sessionId && <Button size="small" onClick={createSession}>Start Session</Button>}>
         <div style={{ flex: 1, overflow: 'auto', maxHeight: 400, marginBottom: 12 }}>
           {messages.map((m, i) => (
@@ -111,6 +182,7 @@ export default function AITab({ getAuth, addLog, host }: Props) {
           <Typography.Text type="secondary">Generate an attack plan by typing "plan" in the chat</Typography.Text>
         )}
       </Card>
+      </div>
     </div>
   );
 }

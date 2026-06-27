@@ -132,6 +132,8 @@ export const api = {
     approveStep: (id: string, stepIndex: number) => post(`/ai/sessions/${id}/approve`, { step_index: stepIndex }),
     stop: (id: string) => post(`/ai/sessions/${id}/stop`),
     deleteSession: (id: string) => request(`/ai/sessions/${id}`, { method: 'DELETE' }),
+    getConfig: () => get('/ai/config'),
+    updateConfig: (data: { provider?: string; model?: string; api_key?: string; base_url?: string }) => request('/ai/config', { method: 'PUT', body: JSON.stringify(data) }),
   },
   cdk: {
     configmaps: (data: object) => post('/cdk/configmaps', data),
