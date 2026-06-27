@@ -62,17 +62,17 @@ K8sPenTool (Java)                    K8sPenTool-ng (Go+React)
 ### 主界面 - 全功能 Dashboard
 ![K8sPenTool-ng 主界面](images/overview.jpg)
 
-*10 个功能模块标签页，侧边栏 Target 管理 + SOCKS5 代理配置，底部实时日志*
+*左侧 Target 管理 + SOCKS5 代理配置，右侧 10 个功能模块标签页，底部实时操作日志*
 
-### AI 助手 - 自动化攻击分析
+### 命令执行 - Pod 终端与文件传输
+![命令执行模块](images/commond_execute.jpg)
+
+*API Server / Kubelet 双通道命令执行 · 快速命令按钮 · 工具探测 · 文件上传 (tar+SPDY) · 端口转发 · 反弹 Shell 生成器*
+
+### AI 助手 - ReAct 自动化攻击分析
 ![AI 助手自动分析](images/ai-analysis.jpg)
 
-*ReAct 工具调用循环：LLM 自动调用 tool → 后端执行 → 结果回灌 → 中文三段式分析结论*
-
-### CDK 战术 - 逃逸评估
-![CDK 战术逃逸评估](images/cdk-escape.jpg)
-
-*7 种 CDK 战术 API 端点：ConfigMap 凭据窃取 · Docker API 探测 · 批量逃逸风险评估 · 逃逸 Pod 生成器*
+*LLM 配置面板 (支持 OpenAI/DeepSeek/Ollama/Anthropic) · 会话管理 · 工具调用轨迹可视化 · 攻击计划生成与步骤审批*
 
 ---
 
