@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/trymonoly/K8sPenTool-ng/internal/util"
@@ -179,23 +180,52 @@ func checkCapabilities(ctx context.Context, t *TargetInfo) (*CheckResult, error)
 		return &CheckResult{CheckID: "available_caps", CheckName: "Capabilities",
 			Category: "privilege", Success: false, Error: err.Error()}, nil
 	}
-	content := string(data)
-	dangerous := []string{"CAP_SYS_ADMIN", "CAP_SYS_PTRACE", "CAP_SYS_MODULE",
-		"CAP_NET_RAW", "CAP_NET_ADMIN", "CAP_DAC_READ_SEARCH", "CAP_SYS_RAWIO"}
-	foundCaps := []string{}
-	for _, cap := range dangerous {
-		if strings.Contains(content, cap) {
-			foundCaps = append(foundCaps, cap)
-		}
+	mask, err := extractCapabilityMask(string(data))
+	if err != nil {
+		return &CheckResult{
+			CheckID:   "available_caps",
+			CheckName: "Capabilities",
+			Category:  "privilege",
+			Success:   false,
+			Error:     err.Error(),
+			Summary:   "Failed to extract capabilities from /proc/1/status",
+		}, nil
+	}
+	decoded, err := util.DecodeCapabilities(mask)
+	if err != nil {
+		return &CheckResult{
+			CheckID:   "available_caps",
+			CheckName: "Capabilities",
+			Category:  "privilege",
+			Success:   false,
+			Error:     err.Error(),
+			Summary:   "Failed to decode capability bitmask",
+		}, nil
+	}
+	foundCaps := make([]string, 0, len(decoded.Dangerous))
+	for _, cap := range decoded.Dangerous {
+		foundCaps = append(foundCaps, cap.Name)
 	}
 	return &CheckResult{
 		CheckID: "available_caps", CheckName: "Capabilities",
 		Category: "privilege", Success: true,
-		Found:     len(foundCaps) > 0,
+		Found:     len(foundCaps) > 0 || decoded.HasAll,
 		RiskLevel: riskFromCaps(foundCaps),
 		Summary:   fmt.Sprintf("Dangerous capabilities: %v", foundCaps),
-		Details:   foundCaps,
+		Details:   decoded,
 	}, nil
+}
+
+func extractCapabilityMask(status string) (string, error) {
+	re := regexp.MustCompile(`(?m)^CapEff:\s*([0-9a-fA-F]+)\s*$`)
+	if match := re.FindStringSubmatch(status); len(match) > 1 {
+		return match[1], nil
+	}
+	re = regexp.MustCompile(`(?m)^CapPrm:\s*([0-9a-fA-F]+)\s*$`)
+	if match := re.FindStringSubmatch(status); len(match) > 1 {
+		return match[1], nil
+	}
+	return "", fmt.Errorf("CapEff/CapPrm not found in process status")
 }
 
 func checkPrivileged(ctx context.Context, t *TargetInfo) (*CheckResult, error) {
@@ -286,10 +316,10 @@ func checkK8sAPIAccess(ctx context.Context, t *TargetInfo) (*CheckResult, error)
 
 func checkCloudMetadata(ctx context.Context, t *TargetInfo) (*CheckResult, error) {
 	metadataURLs := map[string]string{
-		"AWS":    "http://169.254.169.254/latest/meta-data/",
-		"GCP":    "http://metadata.google.internal/computeMetadata/v1/",
-		"Azure":  "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
-		"Alibaba": "http://100.100.100.200/latest/meta-data/",
+		"AWS":          "http://169.254.169.254/latest/meta-data/",
+		"GCP":          "http://metadata.google.internal/computeMetadata/v1/",
+		"Azure":        "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+		"Alibaba":      "http://100.100.100.200/latest/meta-data/",
 		"DigitalOcean": "http://169.254.169.254/metadata/v1.json",
 	}
 	accessible := []string{}

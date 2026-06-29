@@ -46,6 +46,10 @@ export default function App() {
         setProxyPass(cfg.password || '');
       }
     }).catch(() => {});
+
+    api.targets.list().then((savedTargets: Target[]) => {
+      setTargets(savedTargets || []);
+    }).catch(() => {});
   }, []);
 
   const addLog = (msg: string) => {
@@ -152,6 +156,42 @@ export default function App() {
     } catch (e) { message.error('连接失败: ' + e); }
   };
 
+  const handleDeleteTarget = async (target: Target) => {
+    try {
+      await api.targets.delete(target.id);
+      setTargets((prev) => prev.filter((item) => item.id !== target.id));
+      if (activeTarget === target.id) {
+        setActiveTarget(null);
+      }
+      if (host === target.host) {
+        setHost('');
+        setToken('');
+        setUsername('');
+        setPassword('');
+      }
+      addLog(`[-] 已删除目标: ${target.host}`);
+      message.success(`已删除 ${target.host}`);
+    } catch (e) {
+      message.error('删除目标失败: ' + e);
+    }
+  };
+
+  const handleClearTargets = async () => {
+    try {
+      await Promise.all(targets.map((target) => api.targets.delete(target.id)));
+      setTargets([]);
+      setActiveTarget(null);
+      setHost('');
+      setToken('');
+      setUsername('');
+      setPassword('');
+      addLog('[*] 已清空所有保存的 targets');
+      message.success('已清空所有 targets');
+    } catch (e) {
+      message.error('清空 targets 失败: ' + e);
+    }
+  };
+
   return (
     <Layout className="app-layout">
       <Sider width={260} style={{ overflow: 'auto' }}>
@@ -234,43 +274,54 @@ export default function App() {
         <TargetPanel targets={targets} active={activeTarget} onSelect={(t) => {
             setHost(t.host);
             setActiveTarget(t.id);
-            if (t.token) { setToken(t.token); setAuthMode('token'); }
-            else if (t.username) { setUsername(t.username); setPassword(t.password || ''); setAuthMode('userpass'); }
+            setSkipTLS(t.skip_tls ?? true);
+            setTimeout_(t.timeout_sec || 10);
+            if (t.token) {
+              setToken(t.token);
+              setUsername('');
+              setPassword('');
+              setAuthMode('token');
+            } else {
+              setToken('');
+              setUsername(t.username || '');
+              setPassword(t.password || '');
+              setAuthMode('userpass');
+            }
             addLog(`[+] 切换目标: ${t.host} (${t.username || 'token'})`);
-          }} />
+          }} onDelete={handleDeleteTarget} onClearAll={handleClearTargets} />
       </Sider>
       <Layout>
         <Content>
           <Tabs defaultActiveKey="access" size="small" type="card" destroyInactiveTabPane={false}>
             <Tabs.TabPane tab={<span><ThunderboltOutlined />初始访问</span>} key="access">
-              <AccessTab getAuth={getAuth} addLog={addLog} />
+              <AccessTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><CodeOutlined />命令执行</span>} key="exec">
-              <ExecTab getAuth={getAuth} addLog={addLog} />
+              <ExecTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><LockOutlined />权限维持</span>} key="persist">
-              <PersistTab getAuth={getAuth} addLog={addLog} />
+              <PersistTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><RiseOutlined />权限提升</span>} key="escape">
-              <EscapeTab getAuth={getAuth} addLog={addLog} />
+              <EscapeTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><NodeIndexOutlined />横向移动</span>} key="lateral">
-              <LateralTab getAuth={getAuth} addLog={addLog} />
+              <LateralTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><CloudServerOutlined />kubectl</span>} key="kubectl">
-              <KubectlTab getAuth={getAuth} addLog={addLog} />
+              <KubectlTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><RobotOutlined />AI助手</span>} key="ai">
-              <AITab getAuth={getAuth} addLog={addLog} host={host} />
+              <AITab getAuth={getAuth} addLog={addLog} host={host} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><BugOutlined />CDK战术</span>} key="cdk">
-              <CDKTab getAuth={getAuth} addLog={addLog} />
+              <CDKTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><ThunderboltOutlined />Dashboard</span>} key="dashboard">
-              <DashboardTab getAuth={getAuth} addLog={addLog} />
+              <DashboardTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><BookOutlined />命令备忘录</span>} key="info">
-              <InfoTab getAuth={getAuth} addLog={addLog} />
+              <InfoTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
           </Tabs>
         </Content>

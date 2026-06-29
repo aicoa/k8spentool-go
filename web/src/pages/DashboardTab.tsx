@@ -1,22 +1,61 @@
 import React, { useState } from 'react';
 import { Button, Card, Input, Space, Tag, Typography, Steps } from 'antd';
 import { SearchOutlined, KeyOutlined, BugOutlined, ThunderboltOutlined, ApiOutlined } from '@ant-design/icons';
-import { api, targetParams } from '../services/api';
+import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
 const { Text, Paragraph } = Typography;
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; }
+interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
 
-export default function DashboardTab({ getAuth, addLog }: Props) {
+function tokenStatusMeta(status?: string) {
+  switch (status) {
+    case 'cluster_api_access':
+      return { color: 'green', label: '有效' };
+    case 'restricted_rbac':
+      return { color: 'blue', label: '有效(受限)' };
+    case 'unauthorized':
+      return { color: 'red', label: '无效' };
+    case 'client_error':
+      return { color: 'orange', label: '未验证' };
+    default:
+      return { color: 'orange', label: '待确认' };
+  }
+}
+
+export default function DashboardTab({ getAuth, addLog, activeTarget }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [probePort, setProbePort] = useState(443);
 
   const run = async (fn: () => Promise<any>, label: string) => {
     setLoading(true); setResult(null);
-    try { const r = await fn(); setResult(r); addLog(`[Dashboard] ${label}`); }
-    catch (e) { setResult({ error: String(e) }); addLog(`[Dashboard] ${label} failed`); }
+    try {
+      const r = await fn();
+      setResult(r);
+      addLog(`[Dashboard] ${label}`);
+      recordTargetStep(activeTarget, {
+        phase: 'access',
+        tool: 'dashboard',
+        action: label,
+        success: !r?.error,
+        summary: r?.error ? `${label} failed: ${r.error}` : `${label} completed`,
+        data: r,
+        output: r?.output || r?.body,
+        error: r?.error,
+      }).catch(() => {});
+    }
+    catch (e) {
+      setResult({ error: String(e) }); addLog(`[Dashboard] ${label} failed`);
+      recordTargetStep(activeTarget, {
+        phase: 'access',
+        tool: 'dashboard',
+        action: label,
+        success: false,
+        summary: `${label} failed`,
+        error: String(e),
+      }).catch(() => {});
+    }
     finally { setLoading(false); }
   };
 
@@ -70,6 +109,7 @@ export default function DashboardTab({ getAuth, addLog }: Props) {
               <Tag color="green">Dashboard 可访问: {result.url}</Tag>
               {result.version && <Tag color="blue">版本: {result.version}</Tag>}
               {result.auth_bypass_possible && <Tag color="red">认证可能被绕过!</Tag>}
+              {result.skip_login_available && <Tag color="orange">发现 Skip Login 迹象</Tag>}
             </div>
           )}
         </Space>
@@ -84,24 +124,27 @@ export default function DashboardTab({ getAuth, addLog }: Props) {
             提取 Dashboard ServiceAccount Token
           </Button>
           <Text type="secondary" style={{ fontSize: 10 }}>
-            通过 API 查找 kubernetes-dashboard 命名空间的 SA Token，验证有效性
+            通过 API 查找 Dashboard 相关 SA Token，并区分可直接访问 API 与 RBAC 受限的凭据
           </Text>
           {result?.tokens?.length > 0 && (
             <div style={{ marginTop: 8, maxHeight: 200, overflow: 'auto' }}>
-              {result.tokens.map((tok: any, i: number) => (
-                <div key={i} style={{ fontSize: 11, marginBottom: 4, padding: 4, background: '#f5f5f5', borderRadius: 4 }}>
-                  <Text strong>{tok.namespace}/{tok.sa_name}</Text>
-                  <Tag color={tok.token_valid ? 'green' : 'red'} style={{ marginLeft: 4 }}>
-                    {tok.token_valid ? '有效' : '无效'}
-                  </Tag>
-                  <br />
-                  <Text code style={{ fontSize: 9, wordBreak: 'break-all' }}>
-                    {tok.token?.substring(0, 80)}...
-                  </Text>
-                  <br />
-                  <Text type="secondary" style={{ fontSize: 9 }}>{tok.hint}</Text>
-                </div>
-              ))}
+              {result.tokens.map((tok: any, i: number) => {
+                const meta = tokenStatusMeta(tok.token_status);
+                return (
+                  <div key={i} style={{ fontSize: 11, marginBottom: 4, padding: 4, background: '#f5f5f5', borderRadius: 4 }}>
+                    <Text strong>{tok.namespace}/{tok.sa_name}</Text>
+                    <Tag color={meta.color} style={{ marginLeft: 4 }}>
+                      {meta.label}
+                    </Tag>
+                    <br />
+                    <Text code style={{ fontSize: 9, wordBreak: 'break-all' }}>
+                      {tok.token?.substring(0, 80)}...
+                    </Text>
+                    <br />
+                    <Text type="secondary" style={{ fontSize: 9 }}>{tok.hint}</Text>
+                  </div>
+                );
+              })}
             </div>
           )}
           {result?.total === 0 && !loading && (

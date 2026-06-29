@@ -16,6 +16,21 @@ function get(path: string) {
   return request(path, { method: 'GET' });
 }
 
+function trimForContext(value: unknown, depth = 0): unknown {
+  if (value == null) return value;
+  if (typeof value === 'string') {
+    return value.length > 400 ? value.slice(0, 400) + '...' : value;
+  }
+  if (typeof value !== 'object') return value;
+  if (depth >= 2) return Array.isArray(value) ? '[truncated]' : { truncated: true };
+  if (Array.isArray(value)) return value.slice(0, 10).map((item) => trimForContext(item, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>).slice(0, 20)) {
+    out[key] = trimForContext(val, depth + 1);
+  }
+  return out;
+}
+
 export interface AuthConfig {
   host: string;
   token?: string;
@@ -24,6 +39,21 @@ export interface AuthConfig {
   skip_tls?: boolean;
   timeout_sec?: number;
   auth_mode?: 'token' | 'userpass' | 'none';
+}
+
+export type TargetStepPhase = 'info' | 'access' | 'exec' | 'persist' | 'escape' | 'lateral' | 'kubectl';
+
+export interface TargetStepRecord {
+  phase: TargetStepPhase;
+  tool: string;
+  action: string;
+  source?: string;
+  success: boolean;
+  summary: string;
+  data?: unknown;
+  output?: string;
+  error?: string;
+  risk_level?: 'info' | 'low' | 'medium' | 'high' | 'critical';
 }
 
 function targetParams(auth: AuthConfig): Record<string, unknown> {
@@ -40,6 +70,7 @@ export const api = {
     list: () => get('/targets'),
     get: (id: string) => get(`/targets/${id}`),
     delete: (id: string) => request(`/targets/${id}`, { method: 'DELETE' }),
+    recordStep: (id: string, data: TargetStepRecord) => post(`/targets/${id}/steps`, data),
   },
   proxy: {
     get: () => get('/proxy'),
@@ -130,6 +161,7 @@ export const api = {
     generatePlan: (id: string, objective?: string) => post(`/ai/sessions/${id}/plan`, { objective }),
     getPlan: (id: string) => get(`/ai/sessions/${id}/plan`),
     approveStep: (id: string, stepIndex: number) => post(`/ai/sessions/${id}/approve`, { step_index: stepIndex }),
+    approveAction: (id: string, actionId: string) => post(`/ai/sessions/${id}/approve`, { action_id: actionId }),
     stop: (id: string) => post(`/ai/sessions/${id}/stop`),
     deleteSession: (id: string) => request(`/ai/sessions/${id}`, { method: 'DELETE' }),
     getConfig: () => get('/ai/config'),
@@ -152,6 +184,17 @@ export const api = {
 };
 
 export { targetParams };
+
+export async function recordTargetStep(targetId: string | null | undefined, step: TargetStepRecord) {
+  if (!targetId) return;
+  await api.targets.recordStep(targetId, {
+    ...step,
+    source: step.source ?? 'ui_panel',
+    data: trimForContext(step.data),
+    output: typeof step.output === 'string' ? trimForContext(step.output) as string : step.output,
+    error: typeof step.error === 'string' ? trimForContext(step.error) as string : step.error,
+  });
+}
 
 export interface CreateTarget {
   host: string;

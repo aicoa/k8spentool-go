@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { Button, Card, Input, Space, Select } from 'antd';
-import { api, targetParams } from '../services/api';
+import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; }
+interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
 
-export default function AccessTab({ getAuth, addLog }: Props) {
+export default function AccessTab({ getAuth, addLog, activeTarget }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [customPath, setCustomPath] = useState('/api/v1/namespaces/default/secrets');
@@ -17,8 +17,33 @@ export default function AccessTab({ getAuth, addLog }: Props) {
 
   const run = async (fn: () => Promise<any>, label: string) => {
     setLoading(true); setResult(null);
-    try { const r = await fn(); setResult(r); addLog(`[+] ${label} succeeded`); }
-    catch (e) { setResult({ error: String(e) }); addLog(`[-] ${label} failed`); }
+    try {
+      const r = await fn();
+      setResult(r);
+      addLog(`[+] ${label} succeeded`);
+      recordTargetStep(activeTarget, {
+        phase: 'access',
+        tool: 'access',
+        action: label,
+        success: !r?.error,
+        summary: r?.error ? `${label} failed: ${r.error}` : `${label} succeeded`,
+        data: r,
+        output: r?.output || r?.body,
+        error: r?.error,
+      }).catch(() => {});
+    }
+    catch (e) {
+      setResult({ error: String(e) });
+      addLog(`[-] ${label} failed`);
+      recordTargetStep(activeTarget, {
+        phase: 'access',
+        tool: 'access',
+        action: label,
+        success: false,
+        summary: `${label} failed`,
+        error: String(e),
+      }).catch(() => {});
+    }
     finally { setLoading(false); }
   };
 

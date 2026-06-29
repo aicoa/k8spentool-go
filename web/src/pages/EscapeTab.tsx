@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { Button, Card, Input, Select, Space, Tag, Table, Typography } from 'antd';
-import { api, targetParams } from '../services/api';
+import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
 const { Text } = Typography;
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; }
+interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
 
-export default function EscapeTab({ getAuth, addLog }: Props) {
+export default function EscapeTab({ getAuth, addLog, activeTarget }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [checks, setChecks] = useState<any[]>([]);
@@ -20,8 +20,32 @@ export default function EscapeTab({ getAuth, addLog }: Props) {
 
   const run = async (fn: () => Promise<any>, label: string) => {
     setLoading(true); setResult(null);
-    try { const r = await fn(); setResult(r); addLog(`[+] ${label}`); }
-    catch (e) { setResult({ error: String(e) }); addLog(`[-] ${label}`); }
+    try {
+      const r = await fn();
+      setResult(r);
+      addLog(`[+] ${label}`);
+      recordTargetStep(activeTarget, {
+        phase: 'escape',
+        tool: 'escape',
+        action: label,
+        success: !r?.error,
+        summary: r?.error ? `${label} failed: ${r.error}` : `${label} completed`,
+        data: r,
+        output: r?.output || r?.yaml,
+        error: r?.error,
+      }).catch(() => {});
+    }
+    catch (e) {
+      setResult({ error: String(e) }); addLog(`[-] ${label}`);
+      recordTargetStep(activeTarget, {
+        phase: 'escape',
+        tool: 'escape',
+        action: label,
+        success: false,
+        summary: `${label} failed`,
+        error: String(e),
+      }).catch(() => {});
+    }
     finally { setLoading(false); }
   };
   const t = targetParams(getAuth());
@@ -39,8 +63,25 @@ export default function EscapeTab({ getAuth, addLog }: Props) {
                   const r = await api.cdk.assessEscape(t);
                   setAssessment(r);
                   addLog(`[Escape] Assessed ${r.total_pods} pods, ${r.risky_count} have escape potential`);
+                  recordTargetStep(activeTarget, {
+                    phase: 'escape',
+                    tool: 'escape',
+                    action: 'Assess escape',
+                    success: !r?.error,
+                    summary: r?.error ? `Assess escape failed: ${r.error}` : `Assessed ${r.total_pods} pods, ${r.risky_count} risky`,
+                    data: r,
+                    error: r?.error,
+                  }).catch(() => {});
                 } catch (e) {
                   addLog(`[-] Escape assessment failed: ${e}`);
+                  recordTargetStep(activeTarget, {
+                    phase: 'escape',
+                    tool: 'escape',
+                    action: 'Assess escape',
+                    success: false,
+                    summary: 'Assess escape failed',
+                    error: String(e),
+                  }).catch(() => {});
                 }
                 setLoading(false);
               }}>

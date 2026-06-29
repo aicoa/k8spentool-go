@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -85,7 +86,17 @@ func (h *InfoHandler) PortScan(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 3
 	}
-	result := util.QuickPortScan(req.Host, req.TimeoutSec)
+	var result *util.PortScanResult
+	if strings.TrimSpace(req.Ports) == "" {
+		result = util.QuickPortScan(req.Host, req.TimeoutSec)
+	} else {
+		ports, err := util.ParsePortSpec(req.Ports)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		result = util.ScanPorts(req.Host, ports, req.TimeoutSec)
+	}
 	c.JSON(http.StatusOK, result)
 }
 

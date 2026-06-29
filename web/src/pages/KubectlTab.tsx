@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { Button, Card, Input, Space } from 'antd';
-import { api, targetParams } from '../services/api';
+import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; }
+interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
 
-export default function KubectlTab({ getAuth, addLog }: Props) {
+export default function KubectlTab({ getAuth, addLog, activeTarget }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [customCmd, setCustomCmd] = useState('get namespaces');
@@ -13,8 +13,33 @@ export default function KubectlTab({ getAuth, addLog }: Props) {
 
   const run = async (fn: () => Promise<any>, label: string) => {
     setLoading(true); setResult(null);
-    try { const r = await fn(); setResult(r); addLog(`[+] ${label}`); }
-    catch (e) { setResult({ error: String(e) }); addLog(`[-] ${label}`); }
+    try {
+      const r = await fn();
+      setResult(r);
+      addLog(`[+] ${label}`);
+      recordTargetStep(activeTarget, {
+        phase: 'kubectl',
+        tool: 'kubectl',
+        action: label,
+        success: !r?.error,
+        summary: r?.error ? `${label} failed: ${r.error}` : `${label} completed`,
+        data: r,
+        output: r?.output || r?.body,
+        error: r?.error,
+      }).catch(() => {});
+    }
+    catch (e) {
+      setResult({ error: String(e) });
+      addLog(`[-] ${label}`);
+      recordTargetStep(activeTarget, {
+        phase: 'kubectl',
+        tool: 'kubectl',
+        action: label,
+        success: false,
+        summary: `${label} failed`,
+        error: String(e),
+      }).catch(() => {});
+    }
     finally { setLoading(false); }
   };
   const t = targetParams(getAuth());

@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
 import { Button, Card, Input, Space, Tabs, Tag } from 'antd';
-import { api, targetParams } from '../services/api';
+import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; }
+interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
 
-export default function PersistTab({ getAuth, addLog }: Props) {
+export default function PersistTab({ getAuth, addLog, activeTarget }: Props) {
   const base = targetParams(getAuth()) as any;
 
   const [saNs, setSaNs] = useState('kube-system');
@@ -43,8 +43,32 @@ export default function PersistTab({ getAuth, addLog }: Props) {
 
   const run = async (fn: () => Promise<any>, setResult: (r: any) => void, setLoading: (v: boolean) => void, label: string) => {
     setLoading(true); setResult(null);
-    try { const r = await fn(); setResult(r); addLog(`[+] ${label}`); }
-    catch (e) { setResult({ error: String(e) }); addLog(`[-] ${label} failed`); }
+    try {
+      const r = await fn();
+      setResult(r);
+      addLog(`[+] ${label}`);
+      recordTargetStep(activeTarget, {
+        phase: 'persist',
+        tool: 'persist',
+        action: label,
+        success: !r?.error,
+        summary: r?.error ? `${label} failed: ${r.error}` : `${label} completed`,
+        data: r,
+        output: r?.output || r?.yaml || r?.kubeconfig,
+        error: r?.error,
+      }).catch(() => {});
+    }
+    catch (e) {
+      setResult({ error: String(e) }); addLog(`[-] ${label} failed`);
+      recordTargetStep(activeTarget, {
+        phase: 'persist',
+        tool: 'persist',
+        action: label,
+        success: false,
+        summary: `${label} failed`,
+        error: String(e),
+      }).catch(() => {});
+    }
     finally { setLoading(false); }
   };
 

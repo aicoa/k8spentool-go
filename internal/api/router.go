@@ -24,9 +24,9 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 	escapeH := handler.NewEscapeHandler()
 	lateralH := handler.NewLateralHandler()
 	kubectlH := handler.NewKubectlHandler()
-	aiH := handler.NewAIHandler()
-		cdkH := handler.NewCDKHandler()
-		dashH := handler.NewDashboardHandler()
+	aiH := handler.NewAIHandler(targetH)
+	cdkH := handler.NewCDKHandler()
+	dashH := handler.NewDashboardHandler()
 
 	// OpenAPI spec
 	r.GET("/openapi.json", func(c *gin.Context) {
@@ -54,6 +54,7 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 		v1.GET("/targets", targetH.ListTargets)
 		v1.GET("/targets/:id", targetH.GetTarget)
 		v1.DELETE("/targets/:id", targetH.DeleteTarget)
+		v1.POST("/targets/:id/steps", targetH.RecordStep)
 
 		// Proxy (SOCKS5)
 		v1.GET("/proxy", targetH.GetProxyConfig)

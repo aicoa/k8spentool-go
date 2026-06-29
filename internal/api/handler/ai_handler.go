@@ -18,34 +18,57 @@ import (
 )
 
 type AISession struct {
-	ID        string             `json:"id"`
-	TargetID  string             `json:"target_id"`
-	Plan      *engine.AttackPlan `json:"plan,omitempty"`
-	Status    string             `json:"status"`
-	History   []AIHistoryEntry   `json:"history"`
-	CreatedAt time.Time          `json:"created_at"`
-	Auth      *ai.AuthCreds      `json:"auth"`
-	mu        sync.RWMutex
+	ID             string              `json:"id"`
+	TargetID       string              `json:"target_id"`
+	Target         *engine.Target      `json:"target,omitempty"`
+	Plan           *engine.AttackPlan  `json:"plan,omitempty"`
+	Status         string              `json:"status"`
+	Messages       []ai.Message        `json:"messages,omitempty"`
+	History        []AIHistoryEntry    `json:"history"`
+	PendingActions []PendingToolAction `json:"pending_actions,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+	Auth           *ai.AuthCreds       `json:"auth"`
+	mu             sync.RWMutex
 }
 
 type AIHistoryEntry struct {
-	Role      string      `json:"role"`
-	Content   string      `json:"content"`
-	ToolCalls interface{} `json:"tool_calls,omitempty"`
-	Timestamp time.Time   `json:"timestamp"`
+	Role            string      `json:"role"`
+	Content         string      `json:"content"`
+	ToolCalls       interface{} `json:"tool_calls,omitempty"`
+	ToolCallID      string      `json:"tool_call_id,omitempty"`
+	PendingActionID string      `json:"pending_action_id,omitempty"`
+	Timestamp       time.Time   `json:"timestamp"`
+}
+
+type PendingToolAction struct {
+	ID               string      `json:"id"`
+	ToolCall         ai.ToolCall `json:"tool_call"`
+	AssistantContent string      `json:"assistant_content,omitempty"`
+	Status           string      `json:"status"`
+	CreatedAt        time.Time   `json:"created_at"`
+}
+
+type aiChatClient interface {
+	Chat(ctx context.Context, messages []ai.Message, tools []ai.ToolDefinition) (*ai.ChatResponse, error)
 }
 
 type AIHandler struct {
 	sessions    map[string]*AISession
 	mu          sync.RWMutex
-	llmClient   *ai.LLMClient
+	llmClient   aiChatClient
 	llmConfig   *ai.LLMConfig
 	sessionsDir string
+	targetStore aiTargetStore
 }
 
-func NewAIHandler() *AIHandler {
+type aiTargetStore interface {
+	GetSession(id string) (*engine.SessionState, bool)
+}
+
+func NewAIHandler(targetStore aiTargetStore) *AIHandler {
 	h := &AIHandler{
-		sessions: make(map[string]*AISession),
+		sessions:    make(map[string]*AISession),
+		targetStore: targetStore,
 	}
 	h.initPersistence()
 	return h
@@ -61,10 +84,17 @@ func (h *AIHandler) initPersistence() {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
 			path := filepath.Join(h.sessionsDir, e.Name())
 			data, err := os.ReadFile(path)
-			if err != nil { continue }
+			if err != nil {
+				continue
+			}
 			var s AISession
-			if err := json.Unmarshal(data, &s); err != nil { continue }
+			if err := json.Unmarshal(data, &s); err != nil {
+				continue
+			}
 			s.mu = sync.RWMutex{}
+			if len(s.Messages) == 0 && len(s.History) > 0 {
+				s.Messages = buildMessagesFromHistory(s.History)
+			}
 			h.sessions[s.ID] = &s
 		}
 	}
@@ -75,7 +105,9 @@ func (h *AIHandler) saveSession(session *AISession) {
 	session.mu.RLock()
 	data, err := json.Marshal(session)
 	session.mu.RUnlock()
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 	path := filepath.Join(h.sessionsDir, session.ID+".json")
 	os.WriteFile(path, data, 0600)
 }
@@ -85,7 +117,7 @@ func (h *AIHandler) deleteSessionFile(id string) {
 	os.Remove(path)
 }
 
-func (h *AIHandler) GetOrCreateLLMClient() *ai.LLMClient {
+func (h *AIHandler) GetOrCreateLLMClient() aiChatClient {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.llmClient == nil {
@@ -105,21 +137,31 @@ func (h *AIHandler) GetConfig(c *gin.Context) {
 
 func (h *AIHandler) UpdateConfig(c *gin.Context) {
 	var req struct {
-		Provider string  `json:"provider"`
-		Model    string  `json:"model"`
-		APIKey   string  `json:"api_key"`
-		BaseURL  string  `json:"base_url"`
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		APIKey   string `json:"api_key"`
+		BaseURL  string `json:"base_url"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 	cfg := ai.LoadConfig()
-	if req.Provider != "" { cfg.Provider = ai.ProviderType(req.Provider) }
-	if req.Model != "" { cfg.Model = req.Model }
-	if req.APIKey != "" { cfg.APIKey = req.APIKey }
-	if req.BaseURL != "" { cfg.BaseURL = req.BaseURL }
+	if req.Provider != "" {
+		cfg.Provider = ai.ProviderType(req.Provider)
+	}
+	if req.Model != "" {
+		cfg.Model = req.Model
+	}
+	if req.APIKey != "" {
+		cfg.APIKey = req.APIKey
+	}
+	if req.BaseURL != "" {
+		cfg.BaseURL = req.BaseURL
+	}
 	if err := ai.SaveConfig(cfg); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 	h.mu.Lock()
 	h.llmConfig = cfg
@@ -130,13 +172,13 @@ func (h *AIHandler) UpdateConfig(c *gin.Context) {
 
 func (h *AIHandler) CreateSession(c *gin.Context) {
 	var req struct {
-		TargetID  string `json:"target_id" binding:"required"`
-		Host      string `json:"host"`
-		Token     string `json:"token"`
-		Username  string `json:"username"`
-		Password  string `json:"password"`
-		SkipTLS   bool   `json:"skip_tls"`
-		TimeoutSec int   `json:"timeout_sec"`
+		TargetID   string `json:"target_id" binding:"required"`
+		Host       string `json:"host"`
+		Token      string `json:"token"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		SkipTLS    bool   `json:"skip_tls"`
+		TimeoutSec int    `json:"timeout_sec"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -144,11 +186,14 @@ func (h *AIHandler) CreateSession(c *gin.Context) {
 	}
 
 	session := &AISession{
-		ID:        uuid.New().String(),
-		TargetID:  req.TargetID,
-		Status:    "created",
-		History:   make([]AIHistoryEntry, 0),
-		CreatedAt: time.Now(),
+		ID:             uuid.New().String(),
+		TargetID:       req.TargetID,
+		Target:         h.resolveTargetSnapshot(req.TargetID, req.Host, req.Token, req.Username, req.Password, req.SkipTLS, req.TimeoutSec),
+		Status:         "created",
+		Messages:       make([]ai.Message, 0),
+		History:        make([]AIHistoryEntry, 0),
+		PendingActions: make([]PendingToolAction, 0),
+		CreatedAt:      time.Now(),
 		Auth: &ai.AuthCreds{
 			Host:       req.Host,
 			Token:      req.Token,
@@ -208,10 +253,25 @@ func (h *AIHandler) Chat(c *gin.Context) {
 	}
 
 	session.mu.Lock()
-	session.History = append(session.History, AIHistoryEntry{
+	if len(session.PendingActions) > 0 {
+		pending := append([]PendingToolAction(nil), session.PendingActions...)
+		session.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": "pending approval actions exist", "pending_actions": pending})
+		return
+	}
+	userEntry := AIHistoryEntry{
 		Role:      "user",
 		Content:   req.Message,
 		Timestamp: time.Now(),
+	}
+	session.Messages = append(session.Messages, ai.Message{
+		Role:    "user",
+		Content: req.Message,
+	})
+	session.History = append(session.History, AIHistoryEntry{
+		Role:      userEntry.Role,
+		Content:   userEntry.Content,
+		Timestamp: userEntry.Timestamp,
 	})
 	session.mu.Unlock()
 
@@ -228,54 +288,73 @@ func (h *AIHandler) Chat(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
 	defer cancel()
 
-	responseContent, traces, err := h.runToolLoop(ctx, session, tools, req.Message, llm)
+	outcome, err := h.runToolLoop(ctx, session, tools, llm)
 
 	if err != nil {
 		log.Printf("[AI] LLM error: %v, using fallback", err)
-		responseContent = fallbackResponse(req.Message)
-	}
-
-	response := AIHistoryEntry{
-		Role:      "assistant",
-		Content:   responseContent,
-		Timestamp: time.Now(),
+		fallback := AIHistoryEntry{
+			Role:      "assistant",
+			Content:   fallbackResponse(req.Message),
+			Timestamp: time.Now(),
+		}
+		session.mu.Lock()
+		session.Messages = append(session.Messages, ai.Message{Role: "assistant", Content: fallback.Content})
+		session.History = append(session.History, fallback)
+		session.Status = "active"
+		session.mu.Unlock()
+		h.saveSession(session)
+		c.JSON(http.StatusOK, gin.H{
+			"session_id":      id,
+			"response":        fallback,
+			"tool_traces":     []ai.ToolTrace{},
+			"pending_actions": session.PendingActions,
+		})
+		return
 	}
 
 	session.mu.Lock()
-	session.History = append(session.History, response)
-	// Save individual tool call results to history for multi-turn context
-	for _, t := range traces {
-		session.History = append(session.History, AIHistoryEntry{
-			Role:      "tool",
-			Content:   t.ResultPreview,
-			ToolCalls: []ai.ToolCall{{Function: ai.FunctionCallArg{Name: t.Tool, Arguments: t.Args}}},
-			Timestamp: time.Now(),
-		})
+	session.Messages = stripSystemMessage(outcome.Messages)
+	session.History = append(session.History, outcome.HistoryEntries...)
+	if outcome.Response.Role != "" {
+		session.History = append(session.History, outcome.Response)
 	}
-	session.Status = "active"
+	session.PendingActions = outcome.PendingActions
+	if len(session.PendingActions) > 0 {
+		session.Status = "awaiting_approval"
+	} else {
+		session.Status = "active"
+	}
 	session.mu.Unlock()
 
 	h.saveSession(session)
 
 	c.JSON(http.StatusOK, gin.H{
-		"session_id":   id,
-		"response":     response,
-		"tool_traces":  traces,
+		"session_id":      id,
+		"response":        outcome.Response,
+		"tool_traces":     outcome.Traces,
+		"pending_actions": outcome.PendingActions,
 	})
 }
 
+type toolLoopOutcome struct {
+	Messages       []ai.Message
+	HistoryEntries []AIHistoryEntry
+	Response       AIHistoryEntry
+	Traces         []ai.ToolTrace
+	PendingActions []PendingToolAction
+}
+
 // runToolLoop 执行 ReAct 循环，最多 maxRounds 轮。
-func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools []ai.ToolDefinition, userMsg string, llm *ai.LLMClient) (string, []ai.ToolTrace, error) {
+func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools []ai.ToolDefinition, llm aiChatClient) (*toolLoopOutcome, error) {
 	const maxRounds = 6
 
 	session.mu.RLock()
-	messages := buildLLMMessages(session)
+	messages := h.buildLLMMessages(session)
 	session.mu.RUnlock()
 
-	// buildLLMMessages already includes all history; userMsg was appended to session.History before this call.
-	_ = userMsg // kept for signature compatibility; actual messages come from buildLLMMessages(session)
-
 	traces := []ai.ToolTrace{}
+	historyEntries := []AIHistoryEntry{}
+	pendingActions := append([]PendingToolAction(nil), session.PendingActions...)
 	safety := ai.DefaultSafetyConfig()
 
 	for round := 0; round < maxRounds; round++ {
@@ -283,9 +362,19 @@ func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools [
 		if err != nil {
 			// 已执行的工具轨迹仍返回给前端
 			if len(traces) > 0 {
-				return summarizeWithTraces("（LLM 调用出错，以下为已收集到的证据）", traces), traces, nil
+				return &toolLoopOutcome{
+					Messages:       messages,
+					HistoryEntries: historyEntries,
+					Traces:         traces,
+					PendingActions: pendingActions,
+					Response: AIHistoryEntry{
+						Role:      "assistant",
+						Content:   summarizeWithTraces("（LLM 调用出错，以下为已收集到的证据）", traces),
+						Timestamp: time.Now(),
+					},
+				}, nil
 			}
-			return "", traces, err
+			return nil, err
 		}
 		if len(resp.Choices) == 0 {
 			break
@@ -298,38 +387,85 @@ func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools [
 			if content == "" {
 				content = "(模型未返回内容)"
 			}
-			return content, traces, nil
+			messages = append(messages, ai.Message{
+				Role:    "assistant",
+				Content: content,
+			})
+			return &toolLoopOutcome{
+				Messages:       messages,
+				HistoryEntries: historyEntries,
+				Traces:         traces,
+				PendingActions: pendingActions,
+				Response: AIHistoryEntry{
+					Role:      "assistant",
+					Content:   content,
+					Timestamp: time.Now(),
+				},
+			}, nil
 		}
 
 		// 把 assistant 的 tool_calls 加入消息流
-		messages = append(messages, ai.Message{
+		assistantMsg := ai.Message{
 			Role:      "assistant",
 			Content:   choice.Message.Content,
 			ToolCalls: choice.Message.ToolCalls,
+		}
+		messages = append(messages, assistantMsg)
+		historyEntries = append(historyEntries, AIHistoryEntry{
+			Role:      "assistant",
+			Content:   choice.Message.Content,
+			ToolCalls: choice.Message.ToolCalls,
+			Timestamp: time.Now(),
 		})
 
 		// 逐个执行工具，结果以 tool 角色回灌
 		for _, tc := range choice.Message.ToolCalls {
 			// 安全闸门：使用工具的实际风险级别，而非硬编码 RiskHigh
 			riskLevel := ai.GetToolRiskLevel(tc.Function.Name)
-			guard := safety.CheckAction(tc.Function.Name, "", riskLevel)
+			guard := safety.CheckAction(tc.Function.Name, tc.Function.Arguments, riskLevel)
 			var res ai.DispatchResult
 			if guard.NeedApproval {
 				res = ai.DispatchResult{
-					Output: "⚠️ 该操作为破坏性动作（" + tc.Function.Name + "），需人工批准后方可执行。请在 Attack Plan 中 Approve 对应步骤后重试。",
+					Output: "需人工批准",
 					Trace:  ai.ToolTrace{Tool: tc.Function.Name, Args: tc.Function.Arguments, ResultPreview: "需人工批准", Status: "needs_approval"},
 				}
+				pendingActions = append(pendingActions, PendingToolAction{
+					ID:               uuid.New().String(),
+					ToolCall:         tc,
+					AssistantContent: choice.Message.Content,
+					Status:           "pending",
+					CreatedAt:        time.Now(),
+				})
 			} else {
 				res = ai.Dispatch(ctx, tc, session.Auth)
+				messages = append(messages, ai.Message{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    res.Output,
+				})
+				historyEntries = append(historyEntries, AIHistoryEntry{
+					Role:       "tool",
+					Content:    res.Output,
+					ToolCallID: tc.ID,
+					Timestamp:  time.Now(),
+				})
 			}
 			traces = append(traces, res.Trace)
 			log.Printf("[AI] tool %s status=%s risk=%s", tc.Function.Name, res.Trace.Status, riskLevel)
+		}
 
-			messages = append(messages, ai.Message{
-				Role:       "tool",
-				ToolCallID: tc.ID,
-				Content:    res.Output,
-			})
+		if len(pendingActions) > 0 {
+			return &toolLoopOutcome{
+				Messages:       messages,
+				HistoryEntries: historyEntries,
+				Traces:         traces,
+				PendingActions: pendingActions,
+				Response: AIHistoryEntry{
+					Role:      "assistant",
+					Content:   buildPendingApprovalMessage(pendingActions),
+					Timestamp: time.Now(),
+				},
+			}, nil
 		}
 	}
 
@@ -342,11 +478,45 @@ func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools [
 		})
 		resp, err := llm.Chat(ctx, messages, nil)
 		if err == nil && len(resp.Choices) > 0 && resp.Choices[0].Message.Content != "" {
-			return resp.Choices[0].Message.Content, traces, nil
+			messages = append(messages, ai.Message{
+				Role:    "assistant",
+				Content: resp.Choices[0].Message.Content,
+			})
+			return &toolLoopOutcome{
+				Messages:       messages,
+				HistoryEntries: historyEntries,
+				Traces:         traces,
+				PendingActions: pendingActions,
+				Response: AIHistoryEntry{
+					Role:      "assistant",
+					Content:   resp.Choices[0].Message.Content,
+					Timestamp: time.Now(),
+				},
+			}, nil
 		}
-		return summarizeWithTraces("（达到工具调用轮次上限，以下为已收集证据摘要）", traces), traces, nil
+		return &toolLoopOutcome{
+			Messages:       messages,
+			HistoryEntries: historyEntries,
+			Traces:         traces,
+			PendingActions: pendingActions,
+			Response: AIHistoryEntry{
+				Role:      "assistant",
+				Content:   summarizeWithTraces("（达到工具调用轮次上限，以下为已收集证据摘要）", traces),
+				Timestamp: time.Now(),
+			},
+		}, nil
 	}
-	return "(未触发任何工具调用，也无文本结论)", traces, nil
+	return &toolLoopOutcome{
+		Messages:       messages,
+		HistoryEntries: historyEntries,
+		Traces:         traces,
+		PendingActions: pendingActions,
+		Response: AIHistoryEntry{
+			Role:      "assistant",
+			Content:   "(未触发任何工具调用，也无文本结论)",
+			Timestamp: time.Now(),
+		},
+	}, nil
 }
 
 func summarizeWithTraces(prefix string, traces []ai.ToolTrace) string {
@@ -450,16 +620,22 @@ func (h *AIHandler) ApproveStep(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return
 	}
-	if session.Plan == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "no plan"})
-		return
-	}
 
 	var req struct {
-		StepIndex int `json:"step_index"`
+		StepIndex int    `json:"step_index"`
+		ActionID  string `json:"action_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.ActionID != "" {
+		h.approvePendingAction(c, session, req.ActionID)
+		return
+	}
+	if session.Plan == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no plan"})
 		return
 	}
 
@@ -471,6 +647,7 @@ func (h *AIHandler) ApproveStep(c *gin.Context) {
 		session.Plan.CurrentStep = req.StepIndex + 1
 	}
 
+	h.saveSession(session)
 	c.JSON(http.StatusOK, session.Plan)
 }
 
@@ -506,18 +683,25 @@ func (h *AIHandler) DeleteSession(c *gin.Context) {
 }
 
 // buildLLMMessages converts session history to LLM messages, preserving tool call context.
-func buildLLMMessages(session *AISession) []ai.Message {
-	messages := []ai.Message{
-		{Role: "system", Content: ai.SystemPrompt},
+func (h *AIHandler) buildLLMMessages(session *AISession) []ai.Message {
+	systemContent := h.buildSystemPrompt(session)
+	messages := []ai.Message{{Role: "system", Content: systemContent}}
+	if len(session.Messages) > 0 {
+		messages = append(messages, session.Messages...)
+		return messages
 	}
-	for _, entry := range session.History {
+	return append(messages, buildMessagesFromHistory(session.History)...)
+}
+
+func buildMessagesFromHistory(history []AIHistoryEntry) []ai.Message {
+	messages := make([]ai.Message, 0, len(history))
+	for _, entry := range history {
 		msg := ai.Message{
-			Role:    entry.Role,
-			Content: entry.Content,
+			Role:       entry.Role,
+			Content:    entry.Content,
+			ToolCallID: entry.ToolCallID,
 		}
-		// Restore tool_calls from history (needed for assistant messages that requested tools)
 		if entry.Role == "assistant" && entry.ToolCalls != nil {
-			// entry.ToolCalls is interface{}, need to re-serialize then parse
 			if raw, err := json.Marshal(entry.ToolCalls); err == nil {
 				var tcs []ai.ToolCall
 				if json.Unmarshal(raw, &tcs) == nil {
@@ -525,9 +709,204 @@ func buildLLMMessages(session *AISession) []ai.Message {
 				}
 			}
 		}
-		messages = append(messages, msg)
+		if msg.Role == "assistant" || msg.Role == "user" || msg.Role == "tool" {
+			messages = append(messages, msg)
+		}
 	}
 	return messages
+}
+
+func stripSystemMessage(messages []ai.Message) []ai.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	if messages[0].Role == "system" {
+		return append([]ai.Message(nil), messages[1:]...)
+	}
+	return append([]ai.Message(nil), messages...)
+}
+
+func (h *AIHandler) buildSystemPrompt(session *AISession) string {
+	target, phase, completedSteps := h.resolvePromptContext(session)
+	if target == nil {
+		return ai.SystemPrompt
+	}
+	prompt := ai.BuildSystemMessage(target, phase)
+	contextMessage := ai.BuildContextMessage(completedSteps)
+	if contextMessage != "" {
+		prompt += "\n\n" + contextMessage
+	}
+	return prompt
+}
+
+func (h *AIHandler) resolvePromptContext(session *AISession) (*engine.Target, engine.AttackPhase, []engine.StepResult) {
+	if h.targetStore != nil && session.TargetID != "" {
+		if state, ok := h.targetStore.GetSession(session.TargetID); ok && state != nil && state.Target != nil {
+			return cloneTarget(state.Target), state.GetPhase(), state.GetResults()
+		}
+	}
+	if session.Target != nil {
+		return cloneTarget(session.Target), engine.PhaseSetup, nil
+	}
+	return nil, engine.PhaseSetup, nil
+}
+
+func (h *AIHandler) resolveTargetSnapshot(targetID, host, token, username, password string, skipTLS bool, timeoutSec int) *engine.Target {
+	if h.targetStore != nil && targetID != "" {
+		if state, ok := h.targetStore.GetSession(targetID); ok && state != nil && state.Target != nil {
+			return cloneTarget(state.Target)
+		}
+	}
+	if timeoutSec == 0 {
+		timeoutSec = 10
+	}
+	authType := engine.AuthNone
+	switch {
+	case token != "":
+		authType = engine.AuthToken
+	case username != "" || password != "":
+		authType = "userpass"
+	}
+	if host == "" {
+		host = targetID
+	}
+	if host == "" {
+		return nil
+	}
+	return &engine.Target{
+		ID:         targetID,
+		Host:       host,
+		Port:       6443,
+		Token:      token,
+		AuthType:   authType,
+		SkipTLS:    skipTLS,
+		TimeoutSec: timeoutSec,
+		Username:   username,
+		Password:   password,
+	}
+}
+
+func cloneTarget(target *engine.Target) *engine.Target {
+	if target == nil {
+		return nil
+	}
+	cloned := *target
+	return &cloned
+}
+
+func buildPendingApprovalMessage(actions []PendingToolAction) string {
+	pending := make([]PendingToolAction, 0, len(actions))
+	for _, action := range actions {
+		if action.Status == "pending" {
+			pending = append(pending, action)
+		}
+	}
+	if len(pending) == 0 {
+		return "没有待批准动作。"
+	}
+	var sb strings.Builder
+	sb.WriteString("以下工具调用需要人工批准后才能继续：\n")
+	for _, action := range pending {
+		sb.WriteString("- " + action.ToolCall.Function.Name + " [" + action.ID + "]\n")
+	}
+	sb.WriteString("批准后系统会继续执行并让 LLM 收尾。")
+	return sb.String()
+}
+
+func (h *AIHandler) approvePendingAction(c *gin.Context, session *AISession, actionID string) {
+	session.mu.Lock()
+	idx := -1
+	var action PendingToolAction
+	for i, pending := range session.PendingActions {
+		if pending.ID == actionID {
+			idx = i
+			action = pending
+			break
+		}
+	}
+	if idx == -1 {
+		session.mu.Unlock()
+		c.JSON(http.StatusNotFound, gin.H{"error": "pending action not found"})
+		return
+	}
+	session.PendingActions = append(session.PendingActions[:idx], session.PendingActions[idx+1:]...)
+	res := ai.Dispatch(c.Request.Context(), action.ToolCall, session.Auth)
+	session.Messages = append(session.Messages, ai.Message{
+		Role:       "tool",
+		ToolCallID: action.ToolCall.ID,
+		Content:    res.Output,
+	})
+	toolEntry := AIHistoryEntry{
+		Role:            "tool",
+		Content:         res.Output,
+		ToolCallID:      action.ToolCall.ID,
+		PendingActionID: action.ID,
+		Timestamp:       time.Now(),
+	}
+	session.History = append(session.History, toolEntry)
+	remainingPending := append([]PendingToolAction(nil), session.PendingActions...)
+	session.mu.Unlock()
+
+	traces := []ai.ToolTrace{res.Trace}
+	if len(remainingPending) > 0 {
+		msg := AIHistoryEntry{
+			Role:      "assistant",
+			Content:   buildPendingApprovalMessage(remainingPending),
+			Timestamp: time.Now(),
+		}
+		session.mu.Lock()
+		session.History = append(session.History, msg)
+		session.Status = "awaiting_approval"
+		session.mu.Unlock()
+		h.saveSession(session)
+		c.JSON(http.StatusOK, gin.H{
+			"response":        msg,
+			"tool_traces":     traces,
+			"pending_actions": remainingPending,
+		})
+		return
+	}
+
+	llm := h.GetOrCreateLLMClient()
+	tools := ai.GetOpenAIToolDefinitions()
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
+	defer cancel()
+
+	outcome, err := h.runToolLoop(ctx, session, tools, llm)
+	if err != nil {
+		log.Printf("[AI] approve action continue error: %v", err)
+		outcome = &toolLoopOutcome{
+			Messages:       h.buildLLMMessages(session),
+			HistoryEntries: nil,
+			Traces:         traces,
+			PendingActions: nil,
+			Response: AIHistoryEntry{
+				Role:      "assistant",
+				Content:   "工具已执行，但 LLM 收尾失败。请继续提问查看结果。",
+				Timestamp: time.Now(),
+			},
+		}
+	}
+
+	session.mu.Lock()
+	session.Messages = stripSystemMessage(outcome.Messages)
+	session.History = append(session.History, outcome.HistoryEntries...)
+	session.History = append(session.History, outcome.Response)
+	session.PendingActions = outcome.PendingActions
+	if len(session.PendingActions) > 0 {
+		session.Status = "awaiting_approval"
+	} else {
+		session.Status = "active"
+	}
+	session.mu.Unlock()
+
+	allTraces := append(traces, outcome.Traces...)
+	h.saveSession(session)
+	c.JSON(http.StatusOK, gin.H{
+		"response":        outcome.Response,
+		"tool_traces":     allTraces,
+		"pending_actions": outcome.PendingActions,
+	})
 }
 
 func fallbackResponse(userMsg string) string {

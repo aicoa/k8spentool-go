@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -9,13 +10,13 @@ import (
 )
 
 type SafetyConfig struct {
-	RequireHumanApproval  bool     `json:"require_human_approval"`
-	AllowedPhases         []string `json:"allowed_phases"`
-	MaxConsecutiveSteps   int      `json:"max_consecutive_steps"`
-	DenyDestructive       bool     `json:"deny_destructive"`
-	AllowedTargets        []string `json:"allowed_targets"`
-	BlockedTargets        []string `json:"blocked_targets"`
-	MaxRiskLevel          engine.RiskLevel `json:"max_risk_level"`
+	RequireHumanApproval bool             `json:"require_human_approval"`
+	AllowedPhases        []string         `json:"allowed_phases"`
+	MaxConsecutiveSteps  int              `json:"max_consecutive_steps"`
+	DenyDestructive      bool             `json:"deny_destructive"`
+	AllowedTargets       []string         `json:"allowed_targets"`
+	BlockedTargets       []string         `json:"blocked_targets"`
+	MaxRiskLevel         engine.RiskLevel `json:"max_risk_level"`
 }
 
 func DefaultSafetyConfig() *SafetyConfig {
@@ -40,22 +41,22 @@ var destructiveToolNames = map[string]bool{
 
 // toolRiskLevels maps each tool to its actual risk level, used by the safety gate.
 var toolRiskLevels = map[string]engine.RiskLevel{
-	"info_port_scan":           engine.RiskInfo,
-	"info_run_evaluate":        engine.RiskInfo,
-	"access_apiserver":         engine.RiskLow,
-	"access_kubelet":           engine.RiskMedium,
-	"access_etcd_check":        engine.RiskMedium,
-	"access_dashboard":         engine.RiskMedium,
-	"exec_list_pods":           engine.RiskLow,
-	"exec_command":             engine.RiskMedium,
-	"lateral_list_secrets":     engine.RiskMedium,
-	"lateral_view_secret":      engine.RiskHigh,
+	"info_port_scan":            engine.RiskInfo,
+	"info_run_evaluate":         engine.RiskInfo,
+	"access_apiserver":          engine.RiskLow,
+	"access_kubelet":            engine.RiskMedium,
+	"access_etcd_check":         engine.RiskMedium,
+	"access_dashboard":          engine.RiskMedium,
+	"exec_list_pods":            engine.RiskLow,
+	"exec_command":              engine.RiskMedium,
+	"lateral_list_secrets":      engine.RiskMedium,
+	"lateral_view_secret":       engine.RiskHigh,
 	"lateral_discover_services": engine.RiskLow,
-	"persist_create_admin_sa":  engine.RiskCritical,
-	"persist_cronjob":          engine.RiskCritical,
-	"escape_check":             engine.RiskInfo,
-	"escape_privileged":        engine.RiskCritical,
-	"kubectl_exec":             engine.RiskHigh,
+	"persist_create_admin_sa":   engine.RiskCritical,
+	"persist_cronjob":           engine.RiskCritical,
+	"escape_check":              engine.RiskInfo,
+	"escape_privileged":         engine.RiskCritical,
+	"kubectl_exec":              engine.RiskHigh,
 }
 
 // GetToolRiskLevel returns the risk level for a tool, defaulting to RiskMedium.
@@ -67,10 +68,10 @@ func GetToolRiskLevel(toolName string) engine.RiskLevel {
 }
 
 type GuardResult struct {
-	Allowed      bool   `json:"allowed"`
-	Reason       string `json:"reason"`
+	Allowed      bool             `json:"allowed"`
+	Reason       string           `json:"reason"`
 	RiskLevel    engine.RiskLevel `json:"risk_level"`
-	NeedApproval bool   `json:"need_approval"`
+	NeedApproval bool             `json:"need_approval"`
 }
 
 // CheckTarget validates if the target is allowed
@@ -127,7 +128,7 @@ func (c *SafetyConfig) CheckPhase(currentPhase, nextPhase engine.AttackPhase) *G
 
 // CheckAction validates if a specific action is allowed
 func (c *SafetyConfig) CheckAction(toolName string, action string, riskLevel engine.RiskLevel) *GuardResult {
-	isDestructive := isDestructiveAction(toolName)
+	isDestructive := isDestructiveAction(toolName, action)
 
 	if c.DenyDestructive && isDestructive {
 		return &GuardResult{
@@ -157,8 +158,32 @@ func (c *SafetyConfig) CheckAction(toolName string, action string, riskLevel eng
 	return &GuardResult{Allowed: true, RiskLevel: riskLevel}
 }
 
-func isDestructiveAction(toolName string) bool {
+func isDestructiveAction(toolName string, action string) bool {
+	if toolName == "kubectl_exec" {
+		var payload struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(action), &payload); err == nil {
+			verb := firstWord(payload.Command)
+			switch verb {
+			case "get", "describe", "cluster-info", "auth", "version", "":
+				return false
+			}
+		}
+	}
 	return destructiveToolNames[toolName]
+}
+
+func firstWord(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	parts := strings.Fields(s)
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
 }
 
 func matchHost(host, pattern string) bool {

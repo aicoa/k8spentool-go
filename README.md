@@ -329,13 +329,13 @@ cd web && npm run dev
 
 ### AI 功能配置
 
-1. 在 AI 助手标签页，默认使用 DeepSeek API（内置 key）
-2. 也可通过 `PUT /api/v1/ai/config` 配置自己的 LLM：
+1. 在 AI 助手标签页配置你自己的 LLM Provider / Model / Base URL / API Key
+2. 也可通过 `PUT /api/v1/ai/config` 配置：
 ```json
 {
   "provider": "openai",
   "model": "gpt-4",
-  "api_key": "sk-xxx",
+  "api_key": "<your_api_key>",
   "base_url": "https://api.openai.com/v1"
 }
 ```

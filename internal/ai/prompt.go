@@ -1,6 +1,9 @@
 package ai
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/trymonoly/K8sPenTool-ng/internal/engine"
 )
 
@@ -24,6 +27,24 @@ You have access to API tools that can probe, exploit, and persist in K8s cluster
 - For destructive actions (delete, apply, modify), warn the user
 - Provide clear reasoning for each step
 - If a step fails, try alternative approaches before giving up
+
+## Tool Result Format
+Tool results are returned as JSON with these fields:
+- ok: boolean
+- status: ok | error | needs_approval
+- summary: short human-readable conclusion
+- data: supporting evidence and raw details
+- next_suggestions: optional follow-up ideas
+- error: error detail when status=error
+
+Some network tools also include context fields such as:
+- execution_location: where the probe actually ran from
+- selected_target_host: the active target in the UI/session
+- scanned_host: the host that was actually scanned
+- valid_for_selected_target: whether the evidence applies to the current target
+
+Read summary first, then use data as evidence. Do not ignore structured fields just because data contains raw_text.
+If execution_location indicates backend/local probing, do not treat localhost or 127.0.0.1 as the Kubernetes target unless selected_target_host itself is localhost.
 
 ## Analysis Protocol (CRITICAL)
 After collecting information (pods, nodes, secrets, services, RBAC permissions), you MUST produce a structured analysis covering:
@@ -73,7 +94,50 @@ func BuildContextMessage(completedSteps []engine.StepResult) string {
 			status = "failed"
 		}
 		msg += "- [" + status + "] " + step.Phase.String() + "/" + step.Tool +
-			": " + step.Summary + "\n"
+			": " + step.Summary + buildStepContextSuffix(step) + "\n"
 	}
 	return msg
+}
+
+func buildStepContextSuffix(step engine.StepResult) string {
+	parts := []string{}
+	if step.Source != "" {
+		parts = append(parts, "source="+step.Source)
+	}
+	data, ok := step.Data.(map[string]interface{})
+	if !ok {
+		if len(parts) == 0 {
+			return ""
+		}
+		return " [" + strings.Join(parts, ", ") + "]"
+	}
+	for _, key := range []string{"execution_location", "selected_target_host", "scanned_host", "host"} {
+		if value, ok := stringValue(data[key]); ok {
+			parts = append(parts, fmt.Sprintf("%s=%s", key, value))
+		}
+	}
+	if value, ok := boolValue(data["valid_for_selected_target"]); ok {
+		parts = append(parts, fmt.Sprintf("valid_for_selected_target=%t", value))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(parts, ", ") + "]"
+}
+
+func stringValue(v interface{}) (string, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return "", false
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+	return s, true
+}
+
+func boolValue(v interface{}) (bool, bool) {
+	b, ok := v.(bool)
+	return b, ok
 }

@@ -1,14 +1,14 @@
 import React, { useState } from 'react';
 import { Button, Card, Input, Space, Select, Typography, Divider } from 'antd';
 import { RocketOutlined, SearchOutlined, KeyOutlined, ApiOutlined, BugOutlined, ContainerOutlined } from '@ant-design/icons';
-import { api, targetParams } from '../services/api';
+import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
 const { Text, Paragraph } = Typography;
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; }
+interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
 
-export default function CDKTab({ getAuth, addLog }: Props) {
+export default function CDKTab({ getAuth, addLog, activeTarget }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   // Escape Pod params
@@ -20,10 +20,34 @@ export default function CDKTab({ getAuth, addLog }: Props) {
   const [mitmIP, setMitmIP] = useState('');
   const [mitmPort, setMitmPort] = useState(443);
 
-  const run = async (fn: () => Promise<any>, label: string) => {
+  const run = async (fn: () => Promise<any>, label: string, phase: 'info' | 'access' | 'escape' | 'persist' | 'lateral' = 'escape') => {
     setLoading(true); setResult(null);
-    try { const r = await fn(); setResult(r); addLog(`[CDK] ${label}`); }
-    catch (e) { setResult({ error: String(e) }); addLog(`[CDK] ${label} failed`); }
+    try {
+      const r = await fn();
+      setResult(r);
+      addLog(`[CDK] ${label}`);
+      recordTargetStep(activeTarget, {
+        phase,
+        tool: 'cdk',
+        action: label,
+        success: !r?.error,
+        summary: r?.error ? `${label} failed: ${r.error}` : `${label} completed`,
+        data: r,
+        output: r?.output || r?.yaml,
+        error: r?.error,
+      }).catch(() => {});
+    }
+    catch (e) {
+      setResult({ error: String(e) }); addLog(`[CDK] ${label} failed`);
+      recordTargetStep(activeTarget, {
+        phase,
+        tool: 'cdk',
+        action: label,
+        success: false,
+        summary: `${label} failed`,
+        error: String(e),
+      }).catch(() => {});
+    }
     finally { setLoading(false); }
   };
 
@@ -42,18 +66,18 @@ export default function CDKTab({ getAuth, addLog }: Props) {
       {/* Credential Access */}
       <Card title={<span><KeyOutlined /> 凭据获取</span>} size="small">
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Button icon={<SearchOutlined />} onClick={() => run(() => api.cdk.configmaps(t), 'Dump ConfigMaps')}>
+          <Button icon={<SearchOutlined />} onClick={() => run(() => api.cdk.configmaps(t), 'Dump ConfigMaps', 'access')}>
             Dump ConfigMaps (全集群)
           </Button>
           <Text type="secondary" style={{ fontSize: 10 }}>
             列出所有命名空间的 ConfigMap，发现可能的凭据泄露
           </Text>
           <Divider style={{ margin: '4px 0' }} />
-          <Button icon={<ApiOutlined />} onClick={() => run(() => api.cdk.dockerAPI(t), 'Check Docker API')}>
-            检测 Docker Remote API (2375)
+          <Button icon={<ApiOutlined />} onClick={() => run(() => api.cdk.dockerAPI(t), 'Check Docker API', 'access')}>
+            检测 Docker Remote API (2375/2376)
           </Button>
           <Text type="secondary" style={{ fontSize: 10 }}>
-            检测目标是否暴露未授权的 Docker Remote API
+            检测目标是否暴露未授权的 Docker Remote API，包括 2376 TLS 场景
           </Text>
         </Space>
       </Card>
@@ -61,18 +85,25 @@ export default function CDKTab({ getAuth, addLog }: Props) {
       {/* Discovery */}
       <Card title={<span><SearchOutlined /> 信息发现</span>} size="small">
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Button onClick={() => run(() => api.cdk.psp(t), 'Dump PSP')}>
+          <Button onClick={() => run(() => api.cdk.psp(t), 'Dump PSP', 'info')}>
             Dump PodSecurityPolicies
           </Button>
           <Text type="secondary" style={{ fontSize: 10 }}>
             列出所有 PSP 规则，识别允许特权/主机网络的策略（K8s &lt;1.25）
           </Text>
           <Divider style={{ margin: '4px 0' }} />
-          <Button icon={<BugOutlined />} onClick={() => run(() => api.cdk.shadowAPIServer(t), 'Shadow API Server check')}>
+          <Button icon={<BugOutlined />} onClick={() => run(() => api.cdk.shadowAPIServer(t), 'Shadow API Server check', 'access')}>
             检测 Shadow API Server 可行性
           </Button>
           <Text type="secondary" style={{ fontSize: 10 }}>
             分析 kube-apiserver 配置，评估是否可以部署影子 API Server
+          </Text>
+          <Divider style={{ margin: '4px 0' }} />
+          <Button icon={<ContainerOutlined />} onClick={() => run(() => api.cdk.assessEscape(t), 'Assess escape surface', 'escape')}>
+            评估逃逸面
+          </Button>
+          <Text type="secondary" style={{ fontSize: 10 }}>
+            批量评估全局 Pod 的特权、主机命名空间、hostPath、docker.sock 等逃逸面
           </Text>
         </Space>
       </Card>
@@ -81,14 +112,14 @@ export default function CDKTab({ getAuth, addLog }: Props) {
       <Card title={<span><RocketOutlined /> 持久化 & 横向移动</span>} size="small">
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
-            <Input placeholder="目标IP (默认1.1.1.1)" value={mitmIP} onChange={(e) => setMitmIP(e.target.value)} style={{ width: 140 }} />
+            <Input placeholder="被劫持目标IP (默认1.1.1.1)" value={mitmIP} onChange={(e) => setMitmIP(e.target.value)} style={{ width: 160 }} />
             <Input placeholder="端口" value={mitmPort} onChange={(e) => setMitmPort(+e.target.value)} style={{ width: 70 }} />
           </Space>
-          <Button danger onClick={() => run(() => api.cdk.clusterIPMITM({ ...t, target_ip: mitmIP || '1.1.1.1', target_port: mitmPort }), 'CVE-2020-8554 MITM')}>
+          <Button danger onClick={() => run(() => api.cdk.clusterIPMITM({ ...t, victim_ip: mitmIP || '1.1.1.1', target_ip: mitmIP || '1.1.1.1', target_port: mitmPort }), 'CVE-2020-8554 MITM', 'lateral')}>
             生成 CVE-2020-8554 MITM YAML
           </Button>
           <Text type="secondary" style={{ fontSize: 10 }}>
-            CVE-2020-8554: 利用 Service ExternalIP 劫持集群流量
+            CVE-2020-8554: 通过声明受害目标的 ExternalIP，把发往该 IP 的流量重定向到攻击者后端 Pod
           </Text>
         </Space>
       </Card>
@@ -108,7 +139,7 @@ export default function CDKTab({ getAuth, addLog }: Props) {
           </Space>
           <Input placeholder="自定义命令(可选, 默认读取宿主机shadow)" value={escapeCmd} onChange={(e) => setEscapeCmd(e.target.value)} />
           <Button type="primary" danger icon={<BugOutlined />}
-            onClick={() => run(() => api.cdk.escapePod({ ...t, escape_mode: escapeMode, namespace: escapeNs, node_name: escapeNode, command: escapeCmd }), `Generate ${escapeMode} escape pod`)}>
+            onClick={() => run(() => api.cdk.escapePod({ ...t, escape_mode: escapeMode, namespace: escapeNs, node_name: escapeNode, command: escapeCmd }), `Generate ${escapeMode} escape pod`, 'escape')}>
             生成逃逸 Pod YAML
           </Button>
         </Space>

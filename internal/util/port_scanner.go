@@ -2,6 +2,9 @@ package util
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,16 +42,20 @@ type PortScanResult struct {
 }
 
 func QuickPortScan(host string, timeoutSec int) *PortScanResult {
+	return ScanPorts(host, K8sPorts, timeoutSec)
+}
+
+func ScanPorts(host string, ports []PortInfo, timeoutSec int) *PortScanResult {
 	result := &PortScanResult{
 		Host:    host,
 		Timeout: timeoutSec,
-		Total:   len(K8sPorts),
+		Total:   len(ports),
 	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
-	for _, pi := range K8sPorts {
+	for _, pi := range ports {
 		wg.Add(1)
 		go func(p PortInfo) {
 			defer wg.Done()
@@ -72,9 +79,69 @@ func QuickPortScan(host string, timeoutSec int) *PortScanResult {
 
 	select {
 	case <-done:
-	case <-time.After(time.Duration(timeoutSec*len(K8sPorts)+5) * time.Second):
-		fmt.Printf("[WARN] Port scan timed out after %ds\n", timeoutSec*len(K8sPorts)+5)
+	case <-time.After(time.Duration(timeoutSec*len(ports)+5) * time.Second):
+		fmt.Printf("[WARN] Port scan timed out after %ds\n", timeoutSec*len(ports)+5)
 	}
 
+	sort.Slice(result.Open, func(i, j int) bool { return result.Open[i].Port < result.Open[j].Port })
+	sort.Ints(result.Closed)
 	return result
+}
+
+func ParsePortSpec(spec string) ([]PortInfo, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	known := make(map[int]string, len(K8sPorts))
+	for _, port := range K8sPorts {
+		known[port.Port] = port.Service
+	}
+	seen := make(map[int]bool)
+	result := make([]PortInfo, 0)
+	addPort := func(port int) {
+		if port <= 0 || port > 65535 || seen[port] {
+			return
+		}
+		seen[port] = true
+		service := known[port]
+		if service == "" {
+			service = "Custom"
+		}
+		result = append(result, PortInfo{Port: port, Service: service})
+	}
+	for _, token := range strings.Split(spec, ",") {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if strings.Contains(token, "-") {
+			parts := strings.SplitN(token, "-", 2)
+			if len(parts) != 2 {
+				return nil, fmt.Errorf("invalid port range: %s", token)
+			}
+			start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+			if err != nil {
+				return nil, fmt.Errorf("invalid range start: %s", token)
+			}
+			end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err != nil {
+				return nil, fmt.Errorf("invalid range end: %s", token)
+			}
+			if end < start {
+				return nil, fmt.Errorf("invalid port range: %s", token)
+			}
+			for port := start; port <= end; port++ {
+				addPort(port)
+			}
+			continue
+		}
+		port, err := strconv.Atoi(token)
+		if err != nil {
+			return nil, fmt.Errorf("invalid port: %s", token)
+		}
+		addPort(port)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Port < result[j].Port })
+	return result, nil
 }

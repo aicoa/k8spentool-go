@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { Button, Card, Input, Space, Table, Typography, Spin } from 'antd';
-import { api, targetParams } from '../services/api';
+import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; }
+interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
 
 interface CmdItem { cmd: string; desc: string; }
 
-export default function InfoTab({ getAuth, addLog }: Props) {
+export default function InfoTab({ getAuth, addLog, activeTarget }: Props) {
   const [envCmds, setEnvCmds] = useState<CmdItem[]>([]);
   const [privCmds, setPrivCmds] = useState<CmdItem[]>([]);
   const [saCmds, setSaCmds] = useState<CmdItem[]>([]);
@@ -51,8 +51,31 @@ export default function InfoTab({ getAuth, addLog }: Props) {
   };
   const portScan = async () => {
     setLoading('scan', true);
-    try { const r = await api.info.portScan({ ...targetParams(getAuth()), host: getAuth().host, timeout_sec: 3 }); setCapResult(r); addLog('端口扫描完成'); }
-    catch (e) { setCapResult({ error: String(e) }); addLog('[-] 端口扫描失败: ' + e); }
+    try {
+      const r = await api.info.portScan({ ...targetParams(getAuth()), host: getAuth().host, timeout_sec: 3 });
+      setCapResult(r);
+      addLog('端口扫描完成');
+      recordTargetStep(activeTarget, {
+        phase: 'info',
+        tool: 'info',
+        action: 'Port scan',
+        success: !r?.error,
+        summary: r?.error ? `Port scan failed: ${r.error}` : 'Port scan completed',
+        data: r,
+        error: r?.error,
+      }).catch(() => {});
+    }
+    catch (e) {
+      setCapResult({ error: String(e) }); addLog('[-] 端口扫描失败: ' + e);
+      recordTargetStep(activeTarget, {
+        phase: 'info',
+        tool: 'info',
+        action: 'Port scan',
+        success: false,
+        summary: 'Port scan failed',
+        error: String(e),
+      }).catch(() => {});
+    }
     finally { setLoading('scan', false); }
   };
 

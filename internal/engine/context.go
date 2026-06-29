@@ -8,34 +8,35 @@ import (
 type AuthType string
 
 const (
-	AuthNone   AuthType = "none"
-	AuthToken  AuthType = "token"
-	AuthCert   AuthType = "cert"
+	AuthNone       AuthType = "none"
+	AuthToken      AuthType = "token"
+	AuthCert       AuthType = "cert"
 	AuthKubeconfig AuthType = "kubeconfig"
+	AuthUserPass   AuthType = "userpass"
 )
 
 type Target struct {
-	ID          string   `json:"id"`
-	Host        string   `json:"host"`
-	Port        int      `json:"port"`
-	Token       string   `json:"token,omitempty"`
-	AuthType    AuthType `json:"auth_type"`
-	SkipTLS     bool     `json:"skip_tls"`
-	TimeoutSec  int      `json:"timeout_sec"`
-	Kubeconfig  string   `json:"kubeconfig,omitempty"`
-	Username    string   `json:"username,omitempty"`
-	Password    string   `json:"password,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	Host       string    `json:"host"`
+	Port       int       `json:"port"`
+	Token      string    `json:"token,omitempty"`
+	AuthType   AuthType  `json:"auth_type"`
+	SkipTLS    bool      `json:"skip_tls"`
+	TimeoutSec int       `json:"timeout_sec"`
+	Kubeconfig string    `json:"kubeconfig,omitempty"`
+	Username   string    `json:"username,omitempty"`
+	Password   string    `json:"password,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type SessionState struct {
 	mu             sync.RWMutex
-	Target         *Target          `json:"target"`
-	CurrentPhase   AttackPhase      `json:"current_phase"`
-	CompletedSteps []StepResult     `json:"completed_steps"`
+	Target         *Target                      `json:"target"`
+	CurrentPhase   AttackPhase                  `json:"current_phase"`
+	CompletedSteps []StepResult                 `json:"completed_steps"`
 	PhaseResults   map[AttackPhase][]StepResult `json:"phase_results"`
-	StartTime      time.Time        `json:"start_time"`
-	IsRunning      bool             `json:"is_running"`
+	StartTime      time.Time                    `json:"start_time"`
+	IsRunning      bool                         `json:"is_running"`
 }
 
 func NewSessionState(target *Target) *SessionState {
@@ -62,6 +63,16 @@ func (s *SessionState) AddResult(result StepResult) {
 	defer s.mu.Unlock()
 	s.CompletedSteps = append(s.CompletedSteps, result)
 	s.PhaseResults[s.CurrentPhase] = append(s.PhaseResults[s.CurrentPhase], result)
+}
+
+func (s *SessionState) AddPhaseResult(result StepResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.CompletedSteps = append(s.CompletedSteps, result)
+	s.PhaseResults[result.Phase] = append(s.PhaseResults[result.Phase], result)
+	if result.Phase == s.CurrentPhase || IsValidTransition(s.CurrentPhase, result.Phase) {
+		s.CurrentPhase = result.Phase
+	}
 }
 
 func (s *SessionState) GetPhase() AttackPhase {

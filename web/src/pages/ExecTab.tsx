@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { Button, Card, Input, Space, Select, Tag, Typography } from 'antd';
-import { api, targetParams } from '../services/api';
+import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
 const { Text } = Typography;
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; }
+interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
 
-export default function ExecTab({ getAuth, addLog }: Props) {
+export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [ns, setNs] = useState('default');
@@ -16,7 +16,7 @@ export default function ExecTab({ getAuth, addLog }: Props) {
   const [cmd, setCmd] = useState('id');
   const [lhost, setLhost] = useState('');
   const [lport, setLport] = useState('4444');
-  const [shellType, setShellType] = useState('bash');
+  const [shellType, setShellType] = useState('bash-i');
   const [backdoorPod, setBackdoorPod] = useState('backdoor-pod');
   // File upload paths stored in React state
   const [uploadLocalPath, setUploadLocalPath] = useState('');
@@ -44,8 +44,28 @@ export default function ExecTab({ getAuth, addLog }: Props) {
         }
       }
       setResult(r); addLog(`[+] ${label}`);
+      recordTargetStep(activeTarget, {
+        phase: 'exec',
+        tool: 'exec',
+        action: label,
+        success: !r?.error,
+        summary: r?.error ? `${label} failed: ${r.error}` : `${label} completed`,
+        data: r,
+        output: r?.output || r?.body,
+        error: r?.error,
+      }).catch(() => {});
     }
-    catch (e) { setResult({ error: String(e) }); addLog(`[-] ${label}`); }
+    catch (e) {
+      setResult({ error: String(e) }); addLog(`[-] ${label}`);
+      recordTargetStep(activeTarget, {
+        phase: 'exec',
+        tool: 'exec',
+        action: label,
+        success: false,
+        summary: `${label} failed`,
+        error: String(e),
+      }).catch(() => {});
+    }
     finally { setLoading(false); }
   };
 
@@ -62,6 +82,19 @@ export default function ExecTab({ getAuth, addLog }: Props) {
     { label: 'ps aux', cmd: 'ps aux 2>/dev/null || ps' },
     { label: 'mount', cmd: 'mount | head -20' },
     { label: '探测工具', cmd: 'for c in curl wget nc bash sh python python3; do which $c 2>/dev/null && echo "✅ $c" || true; done' },
+  ];
+
+  const reverseShellOptions = [
+    { value: 'bash-i', label: 'bash -i' },
+    { value: 'bash', label: 'bash -c' },
+    { value: 'python', label: 'python' },
+    { value: 'perl', label: 'perl' },
+    { value: 'nc-mkfifo', label: 'nc mkfifo' },
+    { value: 'nc-e', label: 'nc -e' },
+    { value: 'php', label: 'php' },
+    { value: 'ruby', label: 'ruby' },
+    { value: 'lua', label: 'lua' },
+    { value: 'curl', label: 'curl' },
   ];
 
   const selectPod = (podName: string, podNs: string) => {
@@ -164,7 +197,7 @@ export default function ExecTab({ getAuth, addLog }: Props) {
             <Input placeholder="LHOST" value={lhost} onChange={(e) => setLhost(e.target.value)} style={{ width: 130 }} />
             <Input placeholder="LPORT" value={lport} onChange={(e) => setLport(e.target.value)} style={{ width: 80 }} />
             <Select value={shellType} onChange={setShellType} style={{ width: 100 }}
-              options={['bash','python','nc','perl','php'].map(s => ({ value: s, label: s }))} />
+              options={reverseShellOptions} />
           </Space>
           <Button onClick={() => run(() => api.exec.reverseShell({ lhost, lport, type: shellType }), 'Gen shell')}>生成</Button>
         </Space>

