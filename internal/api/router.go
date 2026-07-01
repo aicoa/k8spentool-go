@@ -266,6 +266,9 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 			cdk.POST("/clusterip-mitm", cdkH.ClusterIPMITM)
 			cdk.POST("/escape-pod", cdkH.GenerateEscapePod)
 			cdk.POST("/assess-escape", cdkH.AssessEscape)
+		cdk.POST("/evaluate-pod", cdkH.EvaluatePod)
+		cdk.POST("/auto-escape", cdkH.AutoEscape)
+		cdk.POST("/services-scan", cdkH.ServicesScan)
 		}
 
 		// Dashboard Attack

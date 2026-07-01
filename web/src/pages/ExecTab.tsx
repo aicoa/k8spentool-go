@@ -169,6 +169,7 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
         <Space direction="vertical" style={{ width: '100%' }}>
           <Button onClick={() => run(() => api.exec.kubeletListPods(t), 'List pods via Kubelet')}>列出Pod (Kubelet)</Button>
           <Button onClick={() => run(() => api.exec.kubeletExec({ ...t, namespace: ns, pod_name: pod, command: cmd }), 'Kubelet exec')}>执行 via Kubelet</Button>
+          <Button onClick={() => run(() => api.exec.enumSATokens(t), 'Enum SA tokens')}>枚举SA Token (API)</Button>
         </Space>
       </Card>
       <Card title="文件上传 (kubectl cp)" size="small" style={{ border: '2px solid #52c41a' }}>

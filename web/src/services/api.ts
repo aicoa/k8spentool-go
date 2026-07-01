@@ -174,6 +174,9 @@ export const api = {
     clusterIPMITM: (data: object) => post('/cdk/clusterip-mitm', data),
     escapePod: (data: object) => post('/cdk/escape-pod', data),
     assessEscape: (data: object) => post('/cdk/assess-escape', data),
+    evaluatePod: (data: object) => post('/cdk/evaluate-pod', data),
+    autoEscape: (data: object) => post('/cdk/auto-escape', data),
+    servicesScan: (data: object) => post('/cdk/services-scan', data),
   },
   dashboard: {
     discover: (data: object) => post('/dashboard/discover', data),

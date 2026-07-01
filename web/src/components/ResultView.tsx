@@ -1,5 +1,6 @@
 import React from 'react';
-import { Alert, Spin, Table, Typography, Tag, Space } from 'antd';
+import { Alert, Spin, Table, Typography, Tag, Space, Button, message } from 'antd';
+import { CopyOutlined } from '@ant-design/icons';
 
 const { Text } = Typography;
 
@@ -177,6 +178,14 @@ function findTableField(r: any): { key: string; rows: any[] } | null {
   return null;
 }
 
+function copyToClipboard(text: string) {
+  navigator.clipboard.writeText(text).then(() => message.success('已复制')).catch(() => message.error('复制失败'));
+}
+
+function CopyBtn({ text }: { text: string }) {
+  return <Button size="small" type="link" icon={<CopyOutlined />} style={{ position: 'absolute', top: 4, right: 4, fontSize: 11 }} onClick={() => copyToClipboard(text)} />;
+}
+
 function findTextField(r: any): string | null {
   if (!r || typeof r !== 'object') return null;
   for (const f of TEXT_FIELDS) {
@@ -202,7 +211,7 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
 
   // 字符串直接 pre
   if (typeof result === 'string') {
-    return <pre style={preStyle}>{result}</pre>;
+    return <div style={{ position: 'relative' }}><CopyBtn text={result} /><pre style={preStyle}>{result}</pre></div>;
   }
 
   // 错误优先
@@ -287,7 +296,7 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
         {result._exit_hint && (
           <Tag color="orange" style={{ fontSize: 10, marginBottom: 4 }}>{result._exit_hint}</Tag>
         )}
-        <pre style={preStyle}>{textVal}</pre>
+        <div style={{ position: 'relative' }}><CopyBtn text={textVal} /><pre style={preStyle}>{textVal}</pre></div>
       </div>
     );
   }
@@ -295,7 +304,8 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
 
 
   // 兜底：折叠 JSON
-  return <pre style={preStyle}>{JSON.stringify(result, null, 2)}</pre>;
+  const jsonStr = JSON.stringify(result, null, 2);
+  return <div style={{ position: 'relative' }}><CopyBtn text={jsonStr} /><pre style={preStyle}>{jsonStr}</pre></div>;
 }
 
 const preStyle: React.CSSProperties = { fontSize: 11, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', background: '#f5f5f5', padding: 8, margin: 0, borderRadius: 4 };

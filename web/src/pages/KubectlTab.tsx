@@ -62,6 +62,7 @@ export default function KubectlTab({ getAuth, addLog, activeTarget }: Props) {
         <Space wrap>
           <Button onClick={() => run(() => api.kubectl.clusterInfo(t), 'cluster-info')}>Cluster Info</Button>
           <Button type="primary" onClick={() => run(() => api.kubectl.authCanI(t), 'auth can-i')}>Auth Can-I</Button>
+          <Button onClick={() => setResult(null)}>清除输出</Button>
         </Space>
       </Card>
       <Card title="自定义命令" size="small">

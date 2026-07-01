@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Button, Card, Input, Space, Select, Typography } from 'antd';
-import { ThunderboltOutlined } from '@ant-design/icons';
+import { Button, Card, Input, Space, Select, Typography, Collapse } from 'antd';
+import { ThunderboltOutlined, KeyOutlined } from '@ant-design/icons';
 import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
@@ -20,6 +20,7 @@ export default function AccessTab({ getAuth, addLog, activeTarget, onOpenDashboa
   const [kubeletPod, setKubeletPod] = useState('');
   const [kubeletCmd, setKubeletCmd] = useState('id');
   const [etcdKey, setEtcdKey] = useState('/registry/secrets/default');
+  const [sshPubKey, setSshPubKey] = useState('');
 
   const run = async (fn: () => Promise<any>, label: string) => {
     setLoading(true); setResult(null);
@@ -80,6 +81,23 @@ export default function AccessTab({ getAuth, addLog, activeTarget, onOpenDashboa
             <Input placeholder="命令" value={kubeletCmd} onChange={(e) => setKubeletCmd(e.target.value)} style={{ width: 150 }} />
             <Button onClick={() => run(() => api.access.kubeletExec({ ...t, namespace: kubeletNs, pod_name: kubeletPod, command: kubeletCmd }), 'Kubelet exec')}>执行</Button>
           </Space>
+          <Collapse ghost size="small" items={[{
+            key: 'ssh-inject',
+            label: <span style={{ fontSize: 11 }}><KeyOutlined /> 一键SSH密钥注入（批量）</span>,
+            children: (
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Input.TextArea placeholder="粘贴SSH公钥 (ssh-rsa AAAA...)" value={sshPubKey}
+                  onChange={(e) => setSshPubKey(e.target.value)} rows={2} style={{ fontSize: 11, fontFamily: 'monospace' }} />
+                <Button danger icon={<KeyOutlined />} disabled={!sshPubKey.trim()}
+                  onClick={() => run(() => api.access.kubeletSSH({ ...t, ssh_pub_key: sshPubKey }), 'SSH key injection')}>
+                  一键注入SSH密钥（遍历全部Pod）
+                </Button>
+                <Typography.Text type="secondary" style={{ fontSize: 10 }}>
+                  通过Kubelet API遍历所有Pod/容器，注入SSH公钥到authorized_keys。成功后响应包含 ssh_command 连接命令。
+                </Typography.Text>
+              </Space>
+            ),
+          }]} />
         </Space>
       </Card>
       <Card title="Etcd访问(2379)" size="small">
