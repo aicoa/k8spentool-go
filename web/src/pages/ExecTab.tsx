@@ -10,7 +10,7 @@ interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (
 export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [ns, setNs] = useState('default');
+  const [ns, setNs] = useState(''); // empty = all namespaces for listing; exec falls back to 'default' server-side
   const [pod, setPod] = useState('');
   const [container, setContainer] = useState('');
   const [cmd, setCmd] = useState('id');
@@ -118,7 +118,7 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
       <Card title="API服务器执行" size="small">
         <Space direction="vertical" style={{ width: '100%' }}>
           <Space>
-            <Input placeholder="命名空间" value={ns} onChange={(e) => setNs(e.target.value)} style={{ width: 100 }} />
+            <Input placeholder="命名空间 (留空=全部/执行默认default)" value={ns} onChange={(e) => setNs(e.target.value)} style={{ width: 180 }} />
             <Input placeholder="Pod (点击下方列表自动填充)" value={pod} onChange={(e) => setPod(e.target.value)} style={{ width: 180 }} />
             <Input placeholder="容器(可选)" value={container} onChange={(e) => setContainer(e.target.value)} style={{ width: 120 }} />
           </Space>
