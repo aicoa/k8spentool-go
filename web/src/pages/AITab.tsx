@@ -145,6 +145,14 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
     }
   };
 
+  const closeSession = () => {
+    setSessionId(null);
+    setMessages([]);
+    setPendingActions([]);
+    setPlan(null);
+    addLog('[AI] Session closed');
+  };
+
   const deleteSession = async (id: string) => {
     try {
       await api.ai.deleteSession(id);
@@ -270,7 +278,18 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, flex: 1, minHeight: 0 }}>
         <Card title={<span><RobotOutlined /> AI Chat</span>} size="small" style={{ display: 'flex', flexDirection: 'column' }}
-        extra={!sessionId && <Button size="small" onClick={createSession}>Start Session</Button>}>
+        extra={
+          <Space size={4}>
+            {!sessionId ? (
+              <Button size="small" type="primary" onClick={createSession}>新建会话</Button>
+            ) : (
+              <>
+                <Button size="small" onClick={closeSession}>关闭</Button>
+                <Button size="small" type="primary" onClick={createSession}>新建会话</Button>
+              </>
+            )}
+          </Space>
+        }>
         <div style={{ flex: 1, overflow: 'auto', maxHeight: 400, marginBottom: 12 }}>
           {messages.map((m, i) => (
             <div key={i} style={{ marginBottom: 8, padding: 8, background: m.role === 'user' ? '#e6f7ff' : m.role === 'system' ? '#f6ffed' : '#f0f0f0', borderRadius: 8 }}>
