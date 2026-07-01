@@ -89,10 +89,13 @@ const columnSchemas: Record<string, Col[]> = {
   endpoints: [
     { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 110 },
     { title: 'Name', dataIndex: 'name', key: 'name' },
+    { title: 'Addresses', dataIndex: 'addresses', key: 'addresses', render: (v: any[]) => (v || []).join(', ') || '-' },
   ],
   network_policies: [
     { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 110 },
     { title: 'Name', dataIndex: 'name', key: 'name' },
+    { title: 'Policy Types', dataIndex: 'policy_types', key: 'policy_types', render: (v: any[]) => (v || []).join(', ') || '-' },
+    { title: 'Pod Selector', dataIndex: 'pod_selector', key: 'pod_selector', render: (v: any) => JSON.stringify(v || {}) },
   ],
   taints: [
     { title: 'Node', dataIndex: 'node', key: 'node' },

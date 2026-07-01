@@ -1,10 +1,14 @@
 package handler
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/trymonoly/K8sPenTool-ng/internal/ai"
 	"github.com/trymonoly/K8sPenTool-ng/internal/engine"
 )
@@ -64,5 +68,42 @@ func TestBuildSystemPromptUsesTargetContext(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Auth type: token") {
 		t.Fatalf("expected prompt to include auth type, got %q", prompt)
+	}
+}
+
+func TestUpdateConfigCanClearAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("HOME", t.TempDir())
+
+	router := gin.New()
+	handler := NewAIHandler(nil)
+	router.PUT("/ai/config", handler.UpdateConfig)
+
+	saveReq := httptest.NewRequest(http.MethodPut, "/ai/config", strings.NewReader(`{"provider":"openai","api_key":"secret-value"}`))
+	saveReq.Header.Set("Content-Type", "application/json")
+	saveRec := httptest.NewRecorder()
+	router.ServeHTTP(saveRec, saveReq)
+	if saveRec.Code != http.StatusOK {
+		t.Fatalf("expected initial save to succeed, got %d", saveRec.Code)
+	}
+
+	clearReq := httptest.NewRequest(http.MethodPut, "/ai/config", strings.NewReader(`{"clear_api_key":true}`))
+	clearReq.Header.Set("Content-Type", "application/json")
+	clearRec := httptest.NewRecorder()
+	router.ServeHTTP(clearRec, clearReq)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("expected clear request to succeed, got %d", clearRec.Code)
+	}
+
+	cfg := ai.LoadConfig()
+	if cfg.APIKey != "" {
+		t.Fatalf("expected API key to be cleared, got %q", cfg.APIKey)
+	}
+	body, err := os.ReadFile(ai.ConfigFilePath())
+	if err != nil {
+		t.Fatalf("expected config file to remain readable: %v", err)
+	}
+	if strings.Contains(string(body), "secret-value") {
+		t.Fatalf("expected cleared config file to stop containing the previous API key")
 	}
 }

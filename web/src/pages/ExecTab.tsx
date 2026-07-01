@@ -188,7 +188,7 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
             <Input placeholder="LHOST" value={lhost} onChange={(e) => setLhost(e.target.value)} style={{ width: 130 }} />
             <Input placeholder="LPORT" value={lport} onChange={(e) => setLport(e.target.value)} style={{ width: 80 }} />
           </Space>
-          <Button danger onClick={() => run(() => api.exec.backdoorYAML({ pod_name: backdoorPod, image: 'ubuntu:latest', mount_path: '/mnt', lhost, lport }), 'Gen backdoor YAML')}>生成YAML</Button>
+          <Button danger onClick={() => run(() => api.exec.backdoorYAML({ namespace: ns || 'default', pod_name: backdoorPod, image: 'ubuntu:latest', mount_path: '/mnt', lhost, lport }), 'Gen backdoor YAML')}>生成YAML</Button>
         </Space>
       </Card>
       <Card title="反弹Shell Generator" size="small">

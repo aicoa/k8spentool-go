@@ -46,6 +46,10 @@ func frontendIndexPath() string {
 	)
 }
 
+func frontendDistDir() string {
+	return filepath.Dir(frontendIndexPath())
+}
+
 func shouldServeFrontendPath(path string) bool {
 	if path == "" {
 		return false
@@ -59,6 +63,19 @@ func shouldServeFrontendPath(path string) bool {
 		}
 	}
 	return true
+}
+
+func frontendStaticFile(path string) (string, bool) {
+	rel := strings.TrimPrefix(path, "/")
+	if rel == "" {
+		return "", false
+	}
+	candidate := filepath.Join(frontendDistDir(), filepath.FromSlash(rel))
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	return candidate, true
 }
 
 func SetupRouter(hub *ws.Hub) *gin.Engine {
@@ -264,6 +281,14 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 	r.NoRoute(func(c *gin.Context) {
 		if c.Request.Method != http.MethodGet || !shouldServeFrontendPath(c.Request.URL.Path) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		if staticPath, ok := frontendStaticFile(c.Request.URL.Path); ok {
+			c.File(staticPath)
+			return
+		}
+		if filepath.Ext(c.Request.URL.Path) != "" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "static asset not found"})
 			return
 		}
 		indexPath := frontendIndexPath()

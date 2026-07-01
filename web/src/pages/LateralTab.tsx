@@ -12,6 +12,7 @@ export default function LateralTab({ getAuth, addLog, activeTarget }: Props) {
   const [secretName, setSecretName] = useState('');
   const [secretNs, setSecretNs] = useState('default');
   const [taintNode, setTaintNode] = useState('');
+  const [taintNs, setTaintNs] = useState('default');
 
   const run = async (fn: () => Promise<any>, label: string) => {
     setLoading(true); setResult(null);
@@ -71,8 +72,9 @@ export default function LateralTab({ getAuth, addLog, activeTarget }: Props) {
         <Space direction="vertical" style={{ width: '100%' }}>
           <Button onClick={() => run(() => api.lateral.taints(t), 'Show taints')}>Show Node 污点</Button>
           <Space>
+            <Input placeholder="Namespace" value={taintNs} onChange={(e) => setTaintNs(e.target.value)} style={{ width: 120 }} />
             <Input placeholder="Target node" value={taintNode} onChange={(e) => setTaintNode(e.target.value)} style={{ width: 150 }} />
-            <Button onClick={() => run(() => api.lateral.taintPod({ ...t, node_name: taintNode, host_mount: true }), 'Gen taint pod')}>生成 污点容忍Pod YAML</Button>
+            <Button onClick={() => run(() => api.lateral.taintPod({ ...t, namespace: taintNs, node_name: taintNode, host_mount: true }), 'Gen taint pod')}>生成 污点容忍Pod YAML</Button>
           </Space>
         </Space>
       </Card>

@@ -46,12 +46,14 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
   const [llmApiKey, setLlmApiKey] = useState('');
   const [llmBaseURL, setLlmBaseURL] = useState('');
   const [llmSaving, setLlmSaving] = useState(false);
+  const [hasSavedApiKey, setHasSavedApiKey] = useState(false);
 
   useEffect(() => {
     api.ai.getConfig().then((cfg: any) => {
       if (cfg?.provider) setLlmProvider(cfg.provider);
       if (cfg?.model) setLlmModel(cfg.model);
       if (cfg?.base_url) setLlmBaseURL(cfg.base_url);
+      setHasSavedApiKey(!!cfg?.has_api_key);
     }).catch(() => {});
 
     loadSessions();
@@ -84,11 +86,27 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
         api_key: llmApiKey || undefined,
         base_url: llmBaseURL || undefined,
       });
+      if (llmApiKey.trim()) setHasSavedApiKey(true);
       setLlmApiKey('');
       message.success('LLM 配置已保存');
       addLog(`[AI] LLM config updated: ${llmProvider}/${llmModel || 'default'}`);
     } catch (e) { message.error('保存失败: ' + e); }
     finally { setLlmSaving(false); }
+  };
+
+  const clearSavedApiKey = async () => {
+    setLlmSaving(true);
+    try {
+      await api.ai.updateConfig({ clear_api_key: true });
+      setLlmApiKey('');
+      setHasSavedApiKey(false);
+      message.success('已清除已保存 API Key');
+      addLog('[AI] Saved API key cleared');
+    } catch (e) {
+      message.error('清除 API Key 失败: ' + e);
+    } finally {
+      setLlmSaving(false);
+    }
   };
 
   const auth = getAuth();
@@ -227,12 +245,17 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
                 <Input size="small" placeholder="Base URL (如 https://api.deepseek.com/v1)" value={llmBaseURL}
                   onChange={(e) => setLlmBaseURL(e.target.value)} style={{ width: 280 }} />
               </Space>
-              <Button size="small" type="primary" onClick={saveLLMConfig} loading={llmSaving}
-                disabled={!llmProvider && !llmModel && !llmApiKey && !llmBaseURL}>
-                保存配置
-              </Button>
+              <Space size={8} wrap>
+                <Button size="small" type="primary" onClick={saveLLMConfig} loading={llmSaving}
+                  disabled={!llmProvider && !llmModel && !llmApiKey && !llmBaseURL}>
+                  保存配置
+                </Button>
+                <Button size="small" danger onClick={clearSavedApiKey} loading={llmSaving} disabled={!hasSavedApiKey}>
+                  清除已保存 Key
+                </Button>
+              </Space>
               <Text type="secondary" style={{ fontSize: 10 }}>
-                支持 OpenAI 兼容 API (DeepSeek/GPT等) / Ollama 本地模型 / Anthropic Claude / 自定义。API Key 保存在服务端，不会回显。
+                支持 OpenAI 兼容 API (DeepSeek/GPT等) / Ollama 本地模型 / Anthropic Claude / 自定义。API Key 保存在服务端，不会回显，可在此处清除。
               </Text>
             </Space>
           ),

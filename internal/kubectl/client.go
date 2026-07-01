@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -250,26 +250,38 @@ func (c *Client) CreateClusterRoleBinding(ctx context.Context, crb *rbacv1.Clust
 	return c.Clientset.RbacV1().ClusterRoleBindings().Create(ctx, crb, metav1.CreateOptions{})
 }
 
-
 // DeleteResource deletes a named resource by kind.
 func (c *Client) DeleteResource(ctx context.Context, kind, name, namespace string) error {
 	switch strings.ToLower(kind) {
+	case "namespace", "namespaces", "ns":
+		return c.Clientset.CoreV1().Namespaces().Delete(ctx, name, metav1.DeleteOptions{})
 	case "pod", "pods":
 		return c.Clientset.CoreV1().Pods(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "service", "services", "svc":
 		return c.Clientset.CoreV1().Services(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "configmap", "configmaps", "cm":
+		return c.Clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "deployment", "deployments", "deploy":
 		return c.Clientset.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "daemonset", "daemonsets", "ds":
 		return c.Clientset.AppsV1().DaemonSets(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "cronjob", "cronjobs", "cj":
 		return c.Clientset.BatchV1().CronJobs(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "job", "jobs":
+		return c.Clientset.BatchV1().Jobs(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "secret", "secrets":
 		return c.Clientset.CoreV1().Secrets(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "serviceaccount", "serviceaccounts", "sa":
 		return c.Clientset.CoreV1().ServiceAccounts(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "role", "roles":
+		return c.Clientset.RbacV1().Roles(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "rolebinding", "rolebindings", "rb":
+		return c.Clientset.RbacV1().RoleBindings(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "clusterrole", "clusterroles", "cr":
+		return c.Clientset.RbacV1().ClusterRoles().Delete(ctx, name, metav1.DeleteOptions{})
+	case "clusterrolebinding", "clusterrolebindings", "crb":
+		return c.Clientset.RbacV1().ClusterRoleBindings().Delete(ctx, name, metav1.DeleteOptions{})
 	default:
-		return fmt.Errorf("unsupported resource kind: %s (supported: pod/service/deployment/daemonset/cronjob/secret/sa)", kind)
+		return fmt.Errorf("unsupported resource kind: %s", kind)
 	}
 }
-

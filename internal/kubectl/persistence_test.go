@@ -113,3 +113,30 @@ func TestBuildDaemonSetBackdoorYAMLHandlesQuotedCommands(t *testing.T) {
 		t.Fatalf("unexpected daemonset args: %#v", gotArgs)
 	}
 }
+
+func TestDecodeDeleteTargetsDefaultsNamespaceForNamespacedResources(t *testing.T) {
+	yamlContent := `apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-pod
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: demo-bind
+`
+
+	targets, err := decodeDeleteTargets(yamlContent)
+	if err != nil {
+		t.Fatalf("expected delete targets to decode, got error: %v", err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets, got %d", len(targets))
+	}
+	if targets[0].Namespace != "default" {
+		t.Fatalf("expected namespaced resource to default to namespace=default, got %q", targets[0].Namespace)
+	}
+	if targets[1].Namespace != "" {
+		t.Fatalf("expected cluster-scoped resource namespace to stay empty, got %q", targets[1].Namespace)
+	}
+}

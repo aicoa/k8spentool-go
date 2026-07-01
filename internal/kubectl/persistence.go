@@ -92,6 +92,74 @@ func decodeYAMLDocuments(yamlContent string) ([]*unstructured.Unstructured, erro
 	return objects, nil
 }
 
+type deleteTarget struct {
+	Kind      string
+	Name      string
+	Namespace string
+}
+
+func decodeDeleteTargets(yamlContent string) ([]deleteTarget, error) {
+	objects, err := decodeYAMLDocuments(yamlContent)
+	if err != nil {
+		return nil, err
+	}
+	if len(objects) == 0 {
+		return nil, fmt.Errorf("no Kubernetes objects found in YAML")
+	}
+	targets := make([]deleteTarget, 0, len(objects))
+	for _, obj := range objects {
+		kind := obj.GetKind()
+		name := obj.GetName()
+		if kind == "" || name == "" {
+			return nil, fmt.Errorf("YAML missing kind or metadata.name")
+		}
+		ns := obj.GetNamespace()
+		if ns == "" && !isClusterScopedKind(kind) {
+			ns = "default"
+		}
+		targets = append(targets, deleteTarget{
+			Kind:      kind,
+			Name:      name,
+			Namespace: ns,
+		})
+	}
+	return targets, nil
+}
+
+func isClusterScopedKind(kind string) bool {
+	switch strings.ToLower(kind) {
+	case "namespace", "namespaces", "clusterrole", "clusterroles", "clusterrolebinding", "clusterrolebindings":
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) DeleteYAML(ctx context.Context, yamlContent string) (string, error) {
+	targets, err := decodeDeleteTargets(yamlContent)
+	if err != nil {
+		return "", err
+	}
+
+	results := make([]string, 0, len(targets))
+	for _, target := range targets {
+		err := c.DeleteResource(ctx, target.Kind, target.Name, target.Namespace)
+		scope := target.Namespace
+		if scope == "" {
+			scope = "cluster-scope"
+		}
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				results = append(results, fmt.Sprintf("not found %s/%s in %s", target.Kind, target.Name, scope))
+				continue
+			}
+			return strings.Join(results, "\n"), fmt.Errorf("delete %s/%s in %s: %w", target.Kind, target.Name, scope, err)
+		}
+		results = append(results, fmt.Sprintf("deleted %s/%s in %s", target.Kind, target.Name, scope))
+	}
+	return strings.Join(results, "\n"), nil
+}
+
 // CreatePrivilegedPod creates a privileged pod with host mounts
 func (c *Client) CreatePrivilegedPod(ctx context.Context, namespace string, pod *corev1.Pod) (*corev1.Pod, error) {
 	var privileged bool = true

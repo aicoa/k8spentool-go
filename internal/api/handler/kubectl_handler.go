@@ -27,14 +27,7 @@ type kubectlRequest struct {
 }
 
 func (h *KubectlHandler) buildClient(req *kubectlRequest) (*kubectl.Client, error) {
-	server := "https://" + req.TargetHost + ":6443"
-	if req.Token != "" {
-		return kubectl.NewClient(server, req.Token, req.SkipTLS)
-	}
-	if req.Username != "" {
-		return kubectl.NewClientWithUserPass(server, req.Username, req.Password, req.SkipTLS)
-	}
-	return kubectl.NewClient(server, "", req.SkipTLS)
+	return kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 }
 
 func (h *KubectlHandler) getTimeout(req *kubectlRequest) time.Duration {
@@ -419,47 +412,75 @@ func routeCommand(ctx context.Context, client *kubectl.Client, args []string) (s
 		ns, allNs := parseNS(args[2:])
 		switch resource {
 		case "pods", "pod":
-			if allNs { ns = "" }
+			if allNs {
+				ns = ""
+			}
 			list, err := client.ListPods(ctx, ns)
-			if err != nil { return "Error: " + err.Error(), cmdStr }
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
 			return formatPodTable(list), cmdStr
 		case "nodes", "node", "no":
 			list, err := client.ListNodes(ctx)
-			if err != nil { return "Error: " + err.Error(), cmdStr }
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
 			return formatNodeTable(list), cmdStr
 		case "services", "service", "svc":
-			if allNs { ns = "" }
+			if allNs {
+				ns = ""
+			}
 			list, err := client.ListServices(ctx, ns)
-			if err != nil { return "Error: " + err.Error(), cmdStr }
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
 			return formatSvcTable(list), cmdStr
 		case "secrets", "secret":
-			if allNs { ns = "" }
+			if allNs {
+				ns = ""
+			}
 			list, err := client.ListSecrets(ctx, ns)
-			if err != nil { return "Error: " + err.Error(), cmdStr }
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
 			return formatSecretTable(list), cmdStr
 		case "namespaces", "namespace", "ns":
 			list, err := client.ListNamespaces(ctx)
-			if err != nil { return "Error: " + err.Error(), cmdStr }
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
 			return formatNSTable(list), cmdStr
 		case "deployments", "deployment", "deploy":
-			if allNs { ns = "" }
+			if allNs {
+				ns = ""
+			}
 			list, err := client.Clientset.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
-			if err != nil { return "Error: " + err.Error(), cmdStr }
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
 			var sb strings.Builder
 			for _, d := range list.Items {
 				var image string
-				if len(d.Spec.Template.Spec.Containers) > 0 { image = d.Spec.Template.Spec.Containers[0].Image }
+				if len(d.Spec.Template.Spec.Containers) > 0 {
+					image = d.Spec.Template.Spec.Containers[0].Image
+				}
 				fmt.Fprintf(&sb, "%s/%s replicas=%d ready=%d %s\n", d.Namespace, d.Name, *d.Spec.Replicas, d.Status.ReadyReplicas, image)
 			}
 			return sb.String(), cmdStr
 		case "serviceaccounts", "serviceaccount", "sa":
-			if allNs { ns = "" }
+			if allNs {
+				ns = ""
+			}
 			list, err := client.ListServiceAccounts(ctx, ns)
-			if err != nil { return "Error: " + err.Error(), cmdStr }
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
 			var sb strings.Builder
 			for _, sa := range list.Items {
 				secrets := make([]string, len(sa.Secrets))
-				for i, s := range sa.Secrets { secrets[i] = s.Name }
+				for i, s := range sa.Secrets {
+					secrets[i] = s.Name
+				}
 				fmt.Fprintf(&sb, "%s/%s secrets=%v\n", sa.Namespace, sa.Name, secrets)
 			}
 			return sb.String(), cmdStr
@@ -468,13 +489,19 @@ func routeCommand(ctx context.Context, client *kubectl.Client, args []string) (s
 		}
 	case "cluster-info":
 		v, err := client.ServerVersion()
-		if err != nil { return "Error: " + err.Error(), cmdStr }
+		if err != nil {
+			return "Error: " + err.Error(), cmdStr
+		}
 		return "Kubernetes " + v, cmdStr
 	case "auth":
 		if len(args) >= 2 && args[1] == "can-i" {
 			ok, err := client.CheckSelfPermissions(ctx, "", "*", "*")
-			if err != nil { return "Error: " + err.Error(), cmdStr }
-			if ok { return "can-i *:* = yes (cluster-admin)", cmdStr }
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			if ok {
+				return "can-i *:* = yes (cluster-admin)", cmdStr
+			}
 			return "can-i *:* = no", cmdStr
 		}
 		return "Only 'auth can-i' is supported via client-go. Use Auth Can-I button for full RBAC check.", cmdStr
@@ -495,12 +522,55 @@ func parseNS(args []string) (string, bool) {
 	return "default", false
 }
 
-func formatPodTable(list *corev1.PodList) string { var sb strings.Builder; for _, p := range list.Items { fmt.Fprintf(&sb, "%s/%s %s node=%s ip=%s\n", p.Namespace, p.Name, p.Status.Phase, p.Spec.NodeName, p.Status.PodIP) }; return sb.String() }
-func formatNodeTable(list *corev1.NodeList) string { var sb strings.Builder; for _, n := range list.Items { var ip string; for _, a := range n.Status.Addresses { if a.Type == "InternalIP" { ip = a.Address } }; fmt.Fprintf(&sb, "%s Ready=%v ip=%s os=%s\n", n.Name, isNodeReady(&n), ip, n.Status.NodeInfo.OSImage) }; return sb.String() }
-func formatSvcTable(list *corev1.ServiceList) string { var sb strings.Builder; for _, s := range list.Items { fmt.Fprintf(&sb, "%s/%s %s clusterIP=%s\n", s.Namespace, s.Name, s.Spec.Type, s.Spec.ClusterIP) }; return sb.String() }
-func formatSecretTable(list *corev1.SecretList) string { var sb strings.Builder; for _, s := range list.Items { fmt.Fprintf(&sb, "%s/%s type=%s keys=%d\n", s.Namespace, s.Name, s.Type, len(s.Data)) }; return sb.String() }
-func formatNSTable(list *corev1.NamespaceList) string { var sb strings.Builder; for _, ns := range list.Items { fmt.Fprintf(&sb, "%s %s\n", ns.Name, ns.Status.Phase) }; return sb.String() }
-func isNodeReady(n *corev1.Node) bool { for _, c := range n.Status.Conditions { if c.Type == corev1.NodeReady && c.Status == corev1.ConditionTrue { return true } }; return false }
+func formatPodTable(list *corev1.PodList) string {
+	var sb strings.Builder
+	for _, p := range list.Items {
+		fmt.Fprintf(&sb, "%s/%s %s node=%s ip=%s\n", p.Namespace, p.Name, p.Status.Phase, p.Spec.NodeName, p.Status.PodIP)
+	}
+	return sb.String()
+}
+func formatNodeTable(list *corev1.NodeList) string {
+	var sb strings.Builder
+	for _, n := range list.Items {
+		var ip string
+		for _, a := range n.Status.Addresses {
+			if a.Type == "InternalIP" {
+				ip = a.Address
+			}
+		}
+		fmt.Fprintf(&sb, "%s Ready=%v ip=%s os=%s\n", n.Name, isNodeReady(&n), ip, n.Status.NodeInfo.OSImage)
+	}
+	return sb.String()
+}
+func formatSvcTable(list *corev1.ServiceList) string {
+	var sb strings.Builder
+	for _, s := range list.Items {
+		fmt.Fprintf(&sb, "%s/%s %s clusterIP=%s\n", s.Namespace, s.Name, s.Spec.Type, s.Spec.ClusterIP)
+	}
+	return sb.String()
+}
+func formatSecretTable(list *corev1.SecretList) string {
+	var sb strings.Builder
+	for _, s := range list.Items {
+		fmt.Fprintf(&sb, "%s/%s type=%s keys=%d\n", s.Namespace, s.Name, s.Type, len(s.Data))
+	}
+	return sb.String()
+}
+func formatNSTable(list *corev1.NamespaceList) string {
+	var sb strings.Builder
+	for _, ns := range list.Items {
+		fmt.Fprintf(&sb, "%s %s\n", ns.Name, ns.Status.Phase)
+	}
+	return sb.String()
+}
+func isNodeReady(n *corev1.Node) bool {
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
 
 func (h *KubectlHandler) Apply(c *gin.Context) {
 	var req struct {
@@ -529,16 +599,18 @@ func (h *KubectlHandler) Apply(c *gin.Context) {
 func (h *KubectlHandler) Delete(c *gin.Context) {
 	var req struct {
 		kubectlRequest
-		Resource  string `json:"resource" binding:"required"`
-		Name      string `json:"name" binding:"required"`
+		YAML      string `json:"yaml"`
+		Resource  string `json:"resource"`
+		Name      string `json:"name"`
 		Namespace string `json:"namespace"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Namespace == "" {
-		req.Namespace = "default"
+	if strings.TrimSpace(req.YAML) == "" && (strings.TrimSpace(req.Resource) == "" || strings.TrimSpace(req.Name) == "") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provide yaml or resource/name"})
+		return
 	}
 	client, err := h.buildClient(&req.kubectlRequest)
 	if err != nil {
@@ -547,6 +619,18 @@ func (h *KubectlHandler) Delete(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if strings.TrimSpace(req.YAML) != "" {
+		output, err := client.DeleteYAML(ctx, req.YAML)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{"error": err.Error(), "output": output})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"output": output, "command": "kubectl delete -f <yaml> (via client-go)"})
+		return
+	}
+	if req.Namespace == "" {
+		req.Namespace = "default"
+	}
 	err = client.DeleteResource(ctx, req.Resource, req.Name, req.Namespace)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
@@ -592,4 +676,3 @@ func errStr(err error) string {
 	}
 	return ""
 }
-

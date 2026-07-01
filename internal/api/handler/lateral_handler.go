@@ -16,6 +16,10 @@ type LateralHandler struct{}
 
 func NewLateralHandler() *LateralHandler { return &LateralHandler{} }
 
+func newLateralClient(targetHost, token, username, password string, skipTLS bool) (*kubectl.Client, error) {
+	return kubectl.NewTargetClient(targetHost, token, username, password, skipTLS)
+}
+
 func (h *LateralHandler) buildClient(c *gin.Context) (*kubectl.Client, error) {
 	var req struct {
 		TargetHost string `json:"target_host" binding:"required"`
@@ -27,11 +31,7 @@ func (h *LateralHandler) buildClient(c *gin.Context) (*kubectl.Client, error) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		return nil, err
 	}
-	server := "https://" + req.TargetHost + ":6443"
-	if req.Token != "" {
-		return kubectl.NewClient(server, req.Token, req.SkipTLS)
-	}
-	return kubectl.NewClientWithUserPass(server, req.Username, req.Password, req.SkipTLS)
+	return newLateralClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 }
 
 func (h *LateralHandler) ListSecrets(c *gin.Context) {
@@ -45,21 +45,30 @@ func (h *LateralHandler) ListSecrets(c *gin.Context) {
 		SkipTLS    bool   `json:"skip_tls"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	server := "https://" + req.TargetHost + ":6443"
-	client, err := kubectl.NewClientWithUserPass(server, req.Username, req.Password, req.SkipTLS)
-	if req.Token != "" { client, err = kubectl.NewClient(server, req.Token, req.SkipTLS) }
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
-	if req.TimeoutSec == 0 { req.TimeoutSec = 10 }
+	client, err := newLateralClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 10
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
 	defer cancel()
 	list, err := client.ListSecrets(ctx, req.Namespace)
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	secrets := make([]gin.H, 0, len(list.Items))
 	for _, s := range list.Items {
 		decoded := make(map[string]string)
-		for k, v := range s.Data { decoded[k] = string(v) }
+		for k, v := range s.Data {
+			decoded[k] = string(v)
+		}
 		secrets = append(secrets, gin.H{
 			"namespace": s.Namespace, "name": s.Name, "type": string(s.Type),
 			"keys": len(s.Data), "decoded_keys": decoded,
@@ -80,30 +89,44 @@ func (h *LateralHandler) ViewSecret(c *gin.Context) {
 		SkipTLS    bool   `json:"skip_tls"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	server := "https://" + req.TargetHost + ":6443"
-	client, err := kubectl.NewClientWithUserPass(server, req.Username, req.Password, req.SkipTLS)
-	if req.Token != "" { client, err = kubectl.NewClient(server, req.Token, req.SkipTLS) }
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
-	if req.TimeoutSec == 0 { req.TimeoutSec = 10 }
+	client, err := newLateralClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 10
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
 	defer cancel()
 	sec, err := client.GetSecret(ctx, req.Namespace, req.SecretName)
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	decoded := make(map[string]string)
-	for k, v := range sec.Data { decoded[k] = string(v) }
+	for k, v := range sec.Data {
+		decoded[k] = string(v)
+	}
 	c.JSON(http.StatusOK, gin.H{"namespace": sec.Namespace, "name": sec.Name, "type": string(sec.Type), "decoded_data": decoded})
 }
 
-
 func (h *LateralHandler) ListServices(c *gin.Context) {
 	client, err := h.buildClient(c)
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 	svcList, err := client.ListServices(ctx, "")
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	svcs := make([]gin.H, 0, len(svcList.Items))
 	for _, s := range svcList.Items {
 		ports := make([]string, 0)
@@ -120,11 +143,17 @@ func (h *LateralHandler) ListServices(c *gin.Context) {
 
 func (h *LateralHandler) ListEndpoints(c *gin.Context) {
 	client, err := h.buildClient(c)
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 	epList, err := client.ListEndpoints(ctx, "")
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	eps := make([]gin.H, 0, len(epList.Items))
 	for _, ep := range epList.Items {
 		addrs := make([]string, 0)
@@ -140,11 +169,17 @@ func (h *LateralHandler) ListEndpoints(c *gin.Context) {
 
 func (h *LateralHandler) ListNodes(c *gin.Context) {
 	client, err := h.buildClient(c)
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 	nodeList, err := client.ListNodes(ctx)
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	nodes := make([]gin.H, 0, len(nodeList.Items))
 	for _, n := range nodeList.Items {
 		ip := ""
@@ -164,11 +199,17 @@ func (h *LateralHandler) ListNodes(c *gin.Context) {
 
 func (h *LateralHandler) ListNetworkPolicies(c *gin.Context) {
 	client, err := h.buildClient(c)
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 	npList, err := client.Clientset.NetworkingV1().NetworkPolicies("").List(ctx, metav1.ListOptions{})
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	nps := make([]gin.H, 0, len(npList.Items))
 	for _, np := range npList.Items {
 		nps = append(nps, gin.H{
@@ -182,13 +223,19 @@ func (h *LateralHandler) ListNetworkPolicies(c *gin.Context) {
 
 func (h *LateralHandler) ShowTaints(c *gin.Context) {
 	client, err := h.buildClient(c)
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 	nodeList, err := client.ListNodes(ctx)
-	if err != nil { c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return }
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
 	type taintInfo struct {
-		Node   string `json:"node"`
+		Node   string         `json:"node"`
 		Taints []corev1.Taint `json:"taints"`
 	}
 	taints := make([]taintInfo, 0)
@@ -202,12 +249,21 @@ func (h *LateralHandler) ShowTaints(c *gin.Context) {
 
 func (h *LateralHandler) GenerateTaintPod(c *gin.Context) {
 	var req struct {
+		Namespace string `json:"namespace"`
 		NodeName  string `json:"node_name"`
 		Image     string `json:"image"`
 		HostMount bool   `json:"host_mount"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return }
-	if req.Image == "" { req.Image = "alpine:3.20" }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Image == "" {
+		req.Image = "alpine:3.20"
+	}
+	if req.Namespace == "" {
+		req.Namespace = "default"
+	}
 	vm, vol := "", ""
 	if req.HostMount {
 		vm = "    volumeMounts:\n    - name: host-root\n      mountPath: /host\n"
@@ -229,6 +285,7 @@ func (h *LateralHandler) GenerateTaintPod(c *gin.Context) {
 kind: Pod
 metadata:
   name: %s
+  namespace: %s
 spec:
 %s  tolerations:
   - operator: "Exists"
@@ -237,7 +294,6 @@ spec:
     image: %s
     command: ["/bin/sh"]
     args: ["-c", "while true; do sleep 3600; done"]
-%s%s`, podName, nodeSelector, req.Image, vm, vol)
+%s%s`, podName, req.Namespace, nodeSelector, req.Image, vm, vol)
 	c.JSON(http.StatusOK, gin.H{"yaml": yaml})
 }
-

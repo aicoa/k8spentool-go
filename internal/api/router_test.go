@@ -97,6 +97,40 @@ func TestRootServesFrontendIndex(t *testing.T) {
 	}
 }
 
+func TestBuiltAssetServedAsStaticFile(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join(frontendDistDir(), "assets"))
+	if err != nil {
+		t.Fatalf("read dist assets: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("expected at least one built asset")
+	}
+
+	router := SetupRouter(ws.NewHub())
+	req := httptest.NewRequest(http.MethodGet, "/assets/"+entries[0].Name(), nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "<!doctype html>") {
+		t.Fatalf("expected asset content, got frontend html")
+	}
+}
+
+func TestMissingStaticAssetReturns404(t *testing.T) {
+	router := SetupRouter(ws.NewHub())
+
+	req := httptest.NewRequest(http.MethodGet, "/assets/does-not-exist.js", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
 func TestOpenAPISpecCoversRegisteredPaths(t *testing.T) {
 	routerSourcePath := mustSourcePath(t, "router.go")
 	routerSource, err := os.ReadFile(routerSourcePath)

@@ -28,11 +28,7 @@ func buildPersistClient(c *gin.Context) (*kubectl.Client, error) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		return nil, err
 	}
-	server := "https://" + req.TargetHost + ":6443"
-	if req.Token != "" {
-		return kubectl.NewClient(server, req.Token, req.SkipTLS)
-	}
-	return kubectl.NewClientWithUserPass(server, req.Username, req.Password, req.SkipTLS)
+	return kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 }
 
 // CreateAdminSA 直接用 client-go 创建 SA + ClusterRoleBinding（无 kubectl 二进制依赖）
@@ -65,8 +61,7 @@ func (h *PersistHandler) CreateAdminSA(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 
-	server := "https://" + req.TargetHost + ":6443"
-	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
+	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -120,8 +115,7 @@ func (h *PersistHandler) GetSAToken(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 
-	server := "https://" + req.TargetHost + ":6443"
-	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
+	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -194,8 +188,7 @@ func (h *PersistHandler) GenerateCronJob(c *gin.Context) {
 		return
 	}
 
-	server := "https://" + req.TargetHost + ":6443"
-	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
+	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"yaml": yaml, "error": err.Error()})
 		return
@@ -250,8 +243,7 @@ func (h *PersistHandler) GenerateDaemonSet(c *gin.Context) {
 		return
 	}
 
-	server := "https://" + req.TargetHost + ":6443"
-	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
+	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	resp := gin.H{"yaml": yaml}
 	if err != nil {
 		resp["error"] = err.Error()

@@ -137,10 +137,11 @@ func (h *AIHandler) GetConfig(c *gin.Context) {
 
 func (h *AIHandler) UpdateConfig(c *gin.Context) {
 	var req struct {
-		Provider string `json:"provider"`
-		Model    string `json:"model"`
-		APIKey   string `json:"api_key"`
-		BaseURL  string `json:"base_url"`
+		Provider    string `json:"provider"`
+		Model       string `json:"model"`
+		APIKey      string `json:"api_key"`
+		BaseURL     string `json:"base_url"`
+		ClearAPIKey bool   `json:"clear_api_key"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -153,7 +154,9 @@ func (h *AIHandler) UpdateConfig(c *gin.Context) {
 	if req.Model != "" {
 		cfg.Model = req.Model
 	}
-	if req.APIKey != "" {
+	if req.ClearAPIKey {
+		cfg.APIKey = ""
+	} else if req.APIKey != "" {
 		cfg.APIKey = req.APIKey
 	}
 	if req.BaseURL != "" {

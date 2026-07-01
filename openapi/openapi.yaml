@@ -609,7 +609,7 @@ paths:
                   type: string
                 type:
                   type: string
-                  enum: [bash, python, nc, perl, php]
+                  enum: [bash-i, bash, python, perl, nc, nc-e, nc-mkfifo, php, ruby, lua, curl]
               required: [lhost, lport]
       responses:
         '200':
@@ -970,13 +970,15 @@ paths:
               properties:
                 target_host:
                   type: string
+                namespace:
+                  type: string
                 node_name:
                   type: string
                 image:
                   type: string
                 host_mount:
                   type: boolean
-              required: [target_host, node_name]
+              required: [target_host]
       responses:
         '200':
           description: Taint pod YAML
@@ -1173,13 +1175,23 @@ paths:
                   type: string
                 token:
                   type: string
+                username:
+                  type: string
+                password:
+                  type: string
+                skip_tls:
+                  type: boolean
+                timeout_sec:
+                  type: integer
+                yaml:
+                  type: string
                 resource:
                   type: string
                 name:
                   type: string
                 namespace:
                   type: string
-              required: [target_host, resource, name]
+              required: [target_host]
       responses:
         '200':
           description: Delete result
@@ -1680,6 +1692,8 @@ components:
     BackdoorConfig:
       type: object
       properties:
+        namespace:
+          type: string
         image:
           type: string
         mount_path:
@@ -1973,3 +1987,5 @@ components:
           type: string
         base_url:
           type: string
+        clear_api_key:
+          type: boolean

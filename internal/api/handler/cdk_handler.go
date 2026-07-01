@@ -35,11 +35,7 @@ func (h *CDKHandler) buildClient(c *gin.Context) (*kubectl.Client, error) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		return nil, err
 	}
-	server := "https://" + req.TargetHost + ":6443"
-	if req.Token != "" {
-		return kubectl.NewClient(server, req.Token, req.SkipTLS)
-	}
-	return kubectl.NewClientWithUserPass(server, req.Username, req.Password, req.SkipTLS)
+	return kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 }
 
 // ==================== ConfigMap Dump ====================

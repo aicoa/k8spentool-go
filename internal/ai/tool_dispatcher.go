@@ -31,18 +31,12 @@ func (a *AuthCreds) timeout() int {
 }
 
 func (a *AuthCreds) server() string {
-	return "https://" + a.Host + ":6443"
+	return kubectl.APIServerURL(a.Host)
 }
 
 // buildK8sClient 复用 kubectl_handler / lateral_handler 的同款 client 构造逻辑。
 func (a *AuthCreds) buildK8sClient() (*kubectl.Client, error) {
-	if a.Token != "" {
-		return kubectl.NewClient(a.server(), a.Token, a.SkipTLS)
-	}
-	if a.Username != "" {
-		return kubectl.NewClientWithUserPass(a.server(), a.Username, a.Password, a.SkipTLS)
-	}
-	return kubectl.NewClient(a.server(), "", a.SkipTLS)
+	return kubectl.NewTargetClient(a.Host, a.Token, a.Username, a.Password, a.SkipTLS)
 }
 
 // ToolTrace 是单次工具调用的执行轨迹，回传给前端展示。
@@ -187,13 +181,13 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		_ = json.Unmarshal([]byte(args), &p)
 		host := orDefault(p.TargetHost, auth.Host)
 		token := orDefault(p.Token, auth.Token)
-		url := "https://" + host + ":6443/api/v1/namespaces"
+		url := kubectl.APIServerURL(host) + "/api/v1/namespaces"
 		code, body, err := util.SendRequest(url, "GET", token, auth.timeout(), auth.SkipTLS)
 		if err != nil {
 			return errRes(err)
 		}
 		anon := token == ""
-		return mkData("ok", fmt.Sprintf("APIServer %s:6443 HTTP %d (anon=%v). body head: %s", host, code, anon, preview(string(body))), map[string]interface{}{
+		return mkData("ok", fmt.Sprintf("APIServer %s HTTP %d (anon=%v). body head: %s", kubectl.APIServerURL(host), code, anon, preview(string(body))), map[string]interface{}{
 			"host":         host,
 			"status_code":  code,
 			"anonymous":    anon,

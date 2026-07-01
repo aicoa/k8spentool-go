@@ -34,12 +34,8 @@ func (h *DashboardHandler) buildClient(c *gin.Context) (*kubectl.Client, string,
 	if err := c.ShouldBindJSON(&req); err != nil {
 		return nil, "", err
 	}
-	server := "https://" + req.TargetHost + ":6443"
-	if req.Token != "" {
-		client, err := kubectl.NewClient(server, req.Token, req.SkipTLS)
-		return client, server, err
-	}
-	client, err := kubectl.NewClientWithUserPass(server, req.Username, req.Password, req.SkipTLS)
+	server := kubectl.APIServerURL(req.TargetHost)
+	client, err := kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	return client, server, err
 }
 
@@ -91,8 +87,8 @@ func (h *DashboardHandler) Discover(c *gin.Context) {
 						svcInfo["access_url"] = fmt.Sprintf("https://%s", svc.Status.LoadBalancer.Ingress[0].IP)
 					}
 				} else {
-					svcInfo["access_url"] = fmt.Sprintf("https://%s:6443/api/v1/namespaces/%s/services/https:%s:/proxy/",
-						strings.TrimPrefix(server, "https://"), svc.Namespace, svc.Name)
+					svcInfo["access_url"] = fmt.Sprintf("%s/api/v1/namespaces/%s/services/https:%s:/proxy/",
+						strings.TrimRight(server, "/"), svc.Namespace, svc.Name)
 					svcInfo["access_type"] = "ClusterIP (use API proxy)"
 				}
 
@@ -437,9 +433,6 @@ func (h *DashboardHandler) ExtractToken(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	// Extract target host from the built server URL (e.g. "https://10.0.0.1:6443")
-	targetHost := strings.TrimPrefix(server, "https://")
-	targetHost = strings.TrimSuffix(targetHost, ":6443")
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 
@@ -484,11 +477,7 @@ func (h *DashboardHandler) ExtractToken(c *gin.Context) {
 				// Validate token by testing on API server
 				tokenValid := false
 				tokenStatus := "unverified"
-				testClient, testErr := kubectl.NewClient(
-					fmt.Sprintf("https://%s:6443", targetHost),
-					tokenStr,
-					true,
-				)
+				testClient, testErr := kubectl.NewClient(server, tokenStr, true)
 				if testErr != nil {
 					tokenStatus = "client_error"
 				} else {
