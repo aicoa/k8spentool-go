@@ -37,7 +37,7 @@ func (h *InfoHandler) GetProfiles(c *gin.Context) {
 
 func (h *InfoHandler) RunProfile(c *gin.Context) {
 	var req struct {
-		TargetHost string `json:"target_host"`
+		TargetHost string `json:"target_host" binding:"required"`
 		Token      string `json:"token"`
 		TimeoutSec int    `json:"timeout_sec"`
 		SkipTLS    bool   `json:"skip_tls"`
@@ -48,9 +48,6 @@ func (h *InfoHandler) RunProfile(c *gin.Context) {
 	}
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
-	}
-	if req.TargetHost == "" {
-		req.TargetHost = "localhost"
 	}
 
 	profileID := c.Param("id")

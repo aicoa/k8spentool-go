@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,21 @@ func frontendIndexPath() string {
 		"web/dist/index.html",
 		filepath.Join("..", "..", "web", "dist", "index.html"),
 	)
+}
+
+func shouldServeFrontendPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	if path == "/api" || strings.HasPrefix(path, "/api/") {
+		return false
+	}
+	for _, reserved := range []string{"/swagger", "/openapi", "/docs"} {
+		if path == reserved || strings.HasPrefix(path, reserved+"/") {
+			return false
+		}
+	}
+	return true
 }
 
 func SetupRouter(hub *ws.Hub) *gin.Engine {
@@ -246,9 +262,16 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 
 	// Serve frontend in production
 	r.NoRoute(func(c *gin.Context) {
-		if c.Request.Method == "GET" && c.Request.URL.Path != "" {
-			c.File(frontendIndexPath())
+		if c.Request.Method != http.MethodGet || !shouldServeFrontendPath(c.Request.URL.Path) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
 		}
+		indexPath := frontendIndexPath()
+		if _, err := os.Stat(indexPath); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "frontend build not found"})
+			return
+		}
+		c.File(indexPath)
 	})
 
 	return r

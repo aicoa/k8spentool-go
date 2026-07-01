@@ -34,6 +34,8 @@ tags:
     description: kubectl command operations
   - name: AI
     description: AI agent automation sessions
+  - name: CDK
+    description: CDK-inspired attack tactics and escape helpers
 
 paths:
   # Health
@@ -176,6 +178,12 @@ paths:
           schema:
             type: string
             enum: [basic, extended, full]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccessRequest'
       responses:
         '200':
           description: Evaluation started
@@ -381,6 +389,48 @@ paths:
         '200':
           description: Key value
 
+  /access/etcd/v3/keys:
+    post:
+      tags: [Access]
+      summary: Enumerate etcd v3 keys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetHostRequest'
+      responses:
+        '200':
+          description: Etcd v3 key range response
+
+  /access/etcd/v3/search-secrets:
+    post:
+      tags: [Access]
+      summary: Search etcd v3 for Kubernetes secret objects
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetHostRequest'
+      responses:
+        '200':
+          description: Etcd v3 secret search response
+
+  /access/kubelet/inject-ssh:
+    post:
+      tags: [Access]
+      summary: Try to inject an SSH public key via unauthenticated Kubelet exec
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubeletSSHInjectRequest'
+      responses:
+        '200':
+          description: Injection attempt results
+
   # Access - Dashboard
   /access/dashboard:
     post:
@@ -564,6 +614,34 @@ paths:
       responses:
         '200':
           description: Reverse shell payload
+
+  /exec/upload-file:
+    post:
+      tags: [Exec]
+      summary: Upload a local file into a pod container
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadFileRequest'
+      responses:
+        '200':
+          description: File upload result
+
+  /exec/port-forward:
+    post:
+      tags: [Exec]
+      summary: Generate port-forward and tunnel instructions for a pod
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PortForwardRequest'
+      responses:
+        '200':
+          description: Port-forward guidance
 
   # Persist
   /persist/service-account:
@@ -974,6 +1052,90 @@ paths:
         '200':
           description: Secret list
 
+  /kubectl/get-deployments:
+    post:
+      tags: [Kubectl]
+      summary: kubectl get deployments
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Deployment list
+
+  /kubectl/cluster-info:
+    post:
+      tags: [Kubectl]
+      summary: Query cluster version information
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Cluster version details
+
+  /kubectl/auth-can-i:
+    post:
+      tags: [Kubectl]
+      summary: Evaluate effective RBAC permissions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Permission matrix and admin hint
+
+  /kubectl/get-sa:
+    post:
+      tags: [Kubectl]
+      summary: kubectl get serviceaccounts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Service account list
+
+  /kubectl/get-crb:
+    post:
+      tags: [Kubectl]
+      summary: kubectl get clusterrolebindings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: ClusterRoleBinding list
+
+  /kubectl/get-images:
+    post:
+      tags: [Kubectl]
+      summary: Aggregate images in running pods
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Image inventory
+
   /kubectl/apply:
     post:
       tags: [Kubectl]
@@ -1231,6 +1393,104 @@ paths:
         '200':
           description: Extracted Dashboard tokens
 
+  /cdk/configmaps:
+    post:
+      tags: [CDK]
+      summary: Dump ConfigMap inventory with key hints
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: ConfigMap list
+
+  /cdk/psp:
+    post:
+      tags: [CDK]
+      summary: Query legacy PodSecurityPolicies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: PSP list or removal notice
+
+  /cdk/docker-api:
+    post:
+      tags: [CDK]
+      summary: Probe exposed Docker Remote API
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DockerAPIRequest'
+      responses:
+        '200':
+          description: Docker API accessibility result
+
+  /cdk/shadow-apiserver:
+    post:
+      tags: [CDK]
+      summary: Inspect kube-apiserver pods and generate a shadow manifest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Shadow API server assessment
+
+  /cdk/clusterip-mitm:
+    post:
+      tags: [CDK]
+      summary: Generate CVE-2020-8554 ClusterIP MITM manifest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MITMRequest'
+      responses:
+        '200':
+          description: MITM manifest and notes
+
+  /cdk/escape-pod:
+    post:
+      tags: [CDK]
+      summary: Generate a CDK-style escape pod manifest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EscapePodRequest'
+      responses:
+        '200':
+          description: Escape pod manifest and follow-up commands
+
+  /cdk/assess-escape:
+    post:
+      tags: [CDK]
+      summary: Assess cluster-wide escape risk indicators
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Escape risk assessment
+
 components:
   schemas:
     HealthResponse:
@@ -1300,6 +1560,30 @@ components:
         target_host:
           type: string
         token:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    TargetHostRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    KubeletSSHInjectRequest:
+      type: object
+      required: [target_host, ssh_pub_key]
+      properties:
+        target_host:
+          type: string
+        ssh_pub_key:
           type: string
         timeout_sec:
           type: integer
@@ -1411,6 +1695,54 @@ components:
         ssh_pub_key:
           type: string
 
+    UploadFileRequest:
+      type: object
+      required: [target_host, pod_name, local_path, remote_path]
+      properties:
+        target_host:
+          type: string
+        namespace:
+          type: string
+        pod_name:
+          type: string
+        container_name:
+          type: string
+        local_path:
+          type: string
+        remote_path:
+          type: string
+        token:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        skip_tls:
+          type: boolean
+        timeout_sec:
+          type: integer
+
+    PortForwardRequest:
+      type: object
+      required: [target_host, pod_name]
+      properties:
+        target_host:
+          type: string
+        namespace:
+          type: string
+        pod_name:
+          type: string
+        pod_port:
+          type: integer
+        token:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        skip_tls:
+          type: boolean
+
     AdminSARequest:
       type: object
       required: [target_host]
@@ -1505,6 +1837,72 @@ components:
           properties:
             command:
               type: string
+
+    DockerAPIRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        token:
+          type: string
+        skip_tls:
+          type: boolean
+        timeout_sec:
+          type: integer
+
+    MITMRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        token:
+          type: string
+        skip_tls:
+          type: boolean
+        timeout_sec:
+          type: integer
+        target_ip:
+          type: string
+        victim_ip:
+          type: string
+        target_port:
+          type: integer
+
+    EscapePodRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        token:
+          type: string
+        skip_tls:
+          type: boolean
+        timeout_sec:
+          type: integer
+        escape_mode:
+          type: string
+          enum: [privileged, docker-sock, host-proc, cap-dac, kubelet-log]
+        command:
+          type: string
+        namespace:
+          type: string
+        node_name:
+          type: string
 
     TargetStepRequest:
       type: object

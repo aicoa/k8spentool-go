@@ -58,6 +58,10 @@ export default function App() {
     setLogs((prev) => [...prev.slice(-1000), `[${ts}] ${msg}`]);
   };
 
+  const hasListAccess = (result: any, key: string) => {
+    return !!result && !result.error && Array.isArray(result[key]);
+  };
+
   const handleProxySave = async () => {
     if (!proxyEnabled) {
       // Disable proxy
@@ -124,8 +128,9 @@ export default function App() {
         anonResult = await api.kubectl.getPods(anonParams);
       } catch (_) { /* anonymous might fail, that's OK */ }
 
-      const anonAccessible = anonResult && !anonResult.error && anonResult.pods?.length > 0;
-      const authWorks = verifyResult && !verifyResult.error && verifyResult.pods?.length > 0;
+      const anonAccessible = hasListAccess(anonResult, 'pods');
+      const authWorks = hasListAccess(verifyResult, 'pods');
+      const verifiedPodCount = Number.isFinite(verifyResult?.total) ? verifyResult.total : 0;
 
       // Step 2: Save target
       const authType = authMode === 'token' ? 'token' : (authMode === 'userpass' ? 'userpass' : 'none');
@@ -145,8 +150,8 @@ export default function App() {
         addLog(`[!] ⚠️ ${host} 允许匿名访问！即使凭据错误也能列出资源`);
         message.warning('集群允许匿名访问！凭据可能未生效');
       } else if (authWorks) {
-        addLog(`[+] 目标已验证: ${host} (${authMode === 'userpass' ? '用户名密码' : 'Token'})，共 ${verifyResult.total} 个Pod`);
-        message.success(`连接成功，已认证 (${verifyResult.total} pods)`);
+        addLog(`[+] 目标已验证: ${host} (${authMode === 'userpass' ? '用户名密码' : 'Token'})，共 ${verifiedPodCount} 个Pod`);
+        message.success(`连接成功，已认证 (${verifiedPodCount} pods)`);
       } else if (verifyResult?.error) {
         addLog(`[!] 凭据可能无效: ${host}，但目标仍可访问（可能是匿名）`);
         message.warning('凭据验证失败，但目标可访问（检查是否匿名）');
