@@ -2,8 +2,11 @@ package util
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"golang.org/x/net/proxy"
@@ -19,13 +22,56 @@ type ProxyConfig struct {
 }
 
 var (
-	proxyCfg   *ProxyConfig
-	proxyMu    sync.RWMutex
+	proxyCfg    *ProxyConfig
+	proxyMu     sync.RWMutex
 	proxyCached proxy.Dialer
+	proxyOnce   sync.Once
 )
+
+func proxyConfigPath() string {
+	if v := os.Getenv("K8SPEN_PROXY_CONFIG_PATH"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".k8spen/proxy.json"
+	}
+	return filepath.Join(home, ".k8spen", "proxy.json")
+}
+
+func ensureProxyLoaded() {
+	proxyOnce.Do(func() {
+		body, err := os.ReadFile(proxyConfigPath())
+		if err != nil {
+			return
+		}
+		var cfg ProxyConfig
+		if err := json.Unmarshal(body, &cfg); err != nil {
+			return
+		}
+		proxyCfg = &cfg
+	})
+}
+
+func persistProxyConfig(cfg *ProxyConfig) {
+	path := proxyConfigPath()
+	if cfg == nil {
+		_ = os.Remove(path)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return
+	}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, body, 0600)
+}
 
 // GetProxyConfig returns the current global proxy configuration.
 func GetProxyConfig() *ProxyConfig {
+	ensureProxyLoaded()
 	proxyMu.RLock()
 	defer proxyMu.RUnlock()
 	if proxyCfg == nil {
@@ -38,15 +84,19 @@ func GetProxyConfig() *ProxyConfig {
 
 // SetProxyConfig sets the global proxy configuration.
 func SetProxyConfig(cfg *ProxyConfig) {
+	ensureProxyLoaded()
 	proxyMu.Lock()
 	defer proxyMu.Unlock()
 	if cfg == nil {
 		proxyCfg = nil
 		proxyCached = nil
+		persistProxyConfig(nil)
 		return
 	}
-	proxyCfg = cfg
+	cp := *cfg
+	proxyCfg = &cp
 	proxyCached = nil // invalidate cache
+	persistProxyConfig(proxyCfg)
 }
 
 // ClearProxyConfig disables and clears the proxy configuration.
@@ -56,6 +106,7 @@ func ClearProxyConfig() {
 
 // IsProxyEnabled returns true if a proxy is configured and enabled.
 func IsProxyEnabled() bool {
+	ensureProxyLoaded()
 	proxyMu.RLock()
 	defer proxyMu.RUnlock()
 	return proxyCfg != nil && proxyCfg.Enabled
@@ -71,6 +122,7 @@ func (c *ProxyConfig) Address() string {
 
 // getProxyDialer creates or returns a cached SOCKS5 dialer.
 func getProxyDialer() (proxy.Dialer, error) {
+	ensureProxyLoaded()
 	proxyMu.RLock()
 	if proxyCached != nil {
 		d := proxyCached

@@ -89,6 +89,36 @@ func (s *SessionState) GetResults() []StepResult {
 	return results
 }
 
+func (s *SessionState) Snapshot() *SessionState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var target *Target
+	if s.Target != nil {
+		cloned := *s.Target
+		target = &cloned
+	}
+
+	completed := make([]StepResult, len(s.CompletedSteps))
+	copy(completed, s.CompletedSteps)
+
+	phaseResults := make(map[AttackPhase][]StepResult, len(s.PhaseResults))
+	for phase, results := range s.PhaseResults {
+		cloned := make([]StepResult, len(results))
+		copy(cloned, results)
+		phaseResults[phase] = cloned
+	}
+
+	return &SessionState{
+		Target:         target,
+		CurrentPhase:   s.CurrentPhase,
+		CompletedSteps: completed,
+		PhaseResults:   phaseResults,
+		StartTime:      s.StartTime,
+		IsRunning:      s.IsRunning,
+	}
+}
+
 type LogEntry struct {
 	Timestamp time.Time `json:"timestamp"`
 	Level     string    `json:"level"`

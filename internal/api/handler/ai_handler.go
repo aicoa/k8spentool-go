@@ -935,7 +935,7 @@ func fallbackResponse(userMsg string) string {
 
 ### 3. Dashboard 可达性
 - Kubectl 标签页 **Get Services** → 搜索 "dashboard"
-- Access 标签页 **检测Dashboard** → 探测 30443/30000 等端口
+- Dashboard 标签页 **探测 Dashboard 可访问性** → 探测 30443/30000 等端口
 - 若有 unauthenticated 访问：直接得 token / login 即可
 
 ### 下一步建议

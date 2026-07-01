@@ -110,6 +110,52 @@ paths:
         '200':
           description: Target deleted
 
+  /targets/{id}/steps:
+    post:
+      tags: [Target]
+      summary: Record a step result for the active target
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TargetStepRequest'
+      responses:
+        '200':
+          description: Step recorded
+
+  /proxy:
+    get:
+      tags: [Target]
+      summary: Get global SOCKS5 proxy configuration
+      responses:
+        '200':
+          description: Current proxy config or disabled status
+    post:
+      tags: [Target]
+      summary: Set global SOCKS5 proxy configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProxyConfigRequest'
+      responses:
+        '200':
+          description: Proxy configuration saved
+    delete:
+      tags: [Target]
+      summary: Clear global SOCKS5 proxy configuration
+      responses:
+        '200':
+          description: Proxy configuration cleared
+
   # Info
   /info/profiles:
     get:
@@ -339,7 +385,9 @@ paths:
   /access/dashboard:
     post:
       tags: [Access]
-      summary: Check K8s Dashboard access
+      summary: Legacy dashboard probe alias
+      description: Deprecated compatibility endpoint. Prefer `/dashboard/probe` for the unified Dashboard workflow.
+      deprecated: true
       requestBody:
         required: true
         content:
@@ -1012,6 +1060,18 @@ paths:
       responses:
         '200':
           description: Session details
+    delete:
+      tags: [AI]
+      summary: Delete an AI session
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session deleted
 
   /ai/sessions/{id}/chat:
     post:
@@ -1108,6 +1168,68 @@ paths:
       responses:
         '200':
           description: Session stopped
+
+  /ai/config:
+    get:
+      tags: [AI]
+      summary: Get current LLM configuration metadata
+      responses:
+        '200':
+          description: Current LLM configuration without exposing the API key
+    put:
+      tags: [AI]
+      summary: Update LLM configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIConfigRequest'
+      responses:
+        '200':
+          description: LLM configuration saved
+
+  /dashboard/discover:
+    post:
+      tags: [Access]
+      summary: Discover Dashboard-related services, pods, deployments, and ingresses
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Dashboard discovery results
+
+  /dashboard/probe:
+    post:
+      tags: [Access]
+      summary: Probe Dashboard accessibility and auth bypass indicators
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DashboardProbeRequest'
+      responses:
+        '200':
+          description: Dashboard probe results
+
+  /dashboard/extract-token:
+    post:
+      tags: [Access]
+      summary: Extract Dashboard-related service account tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Extracted Dashboard tokens
 
 components:
   schemas:
@@ -1383,3 +1505,73 @@ components:
           properties:
             command:
               type: string
+
+    TargetStepRequest:
+      type: object
+      required: [phase, tool, summary]
+      properties:
+        phase:
+          type: string
+          enum: [setup, info, access, exec, persist, escape, lateral, kubectl]
+        tool:
+          type: string
+        summary:
+          type: string
+        details:
+          type: string
+        success:
+          type: boolean
+        risk_level:
+          type: string
+          enum: [info, low, medium, high, critical]
+        source:
+          type: string
+        data:
+          type: object
+          additionalProperties: true
+
+    ProxyConfigRequest:
+      type: object
+      required: [host, port]
+      properties:
+        enabled:
+          type: boolean
+          default: true
+        host:
+          type: string
+        port:
+          type: integer
+        username:
+          type: string
+        password:
+          type: string
+
+    DashboardProbeRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        dashboard_port:
+          type: integer
+        dashboard_path:
+          type: string
+        use_https:
+          type: boolean
+        timeout_sec:
+          type: integer
+        skip_tls:
+          type: boolean
+
+    AIConfigRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [openai, ollama, anthropic, custom]
+        model:
+          type: string
+        api_key:
+          type: string
+        base_url:
+          type: string

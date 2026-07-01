@@ -2,12 +2,48 @@ package api
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/trymonoly/K8sPenTool-ng/internal/api/handler"
 	"github.com/trymonoly/K8sPenTool-ng/internal/api/ws"
+	"sigs.k8s.io/yaml"
 )
+
+func resolveExistingPath(candidates ...string) string {
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+
+func openAPISpecPath() string {
+	return resolveExistingPath(
+		"openapi/openapi.yaml",
+		filepath.Join("..", "..", "openapi", "openapi.yaml"),
+	)
+}
+
+func swaggerAssetsPath() string {
+	return resolveExistingPath(
+		"web/swagger",
+		filepath.Join("..", "..", "web", "swagger"),
+	)
+}
+
+func frontendIndexPath() string {
+	return resolveExistingPath(
+		"web/dist/index.html",
+		filepath.Join("..", "..", "web", "dist", "index.html"),
+	)
+}
 
 func SetupRouter(hub *ws.Hub) *gin.Engine {
 	r := gin.Default()
@@ -30,12 +66,25 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 
 	// OpenAPI spec
 	r.GET("/openapi.json", func(c *gin.Context) {
-		c.File("openapi/openapi.yaml")
+		body, err := os.ReadFile(openAPISpecPath())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		jsonBody, err := yaml.YAMLToJSON(body)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.Data(http.StatusOK, "application/json; charset=utf-8", jsonBody)
+	})
+	r.GET("/openapi.yaml", func(c *gin.Context) {
+		c.File(openAPISpecPath())
 	})
 	r.GET("/docs", func(c *gin.Context) {
 		c.Redirect(http.StatusMovedPermanently, "/swagger/")
 	})
-	r.Static("/swagger", "./web/swagger")
+	r.Static("/swagger", swaggerAssetsPath())
 
 	// WebSocket
 	r.GET("/api/v1/ws", func(c *gin.Context) {
@@ -198,7 +247,7 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 	// Serve frontend in production
 	r.NoRoute(func(c *gin.Context) {
 		if c.Request.Method == "GET" && c.Request.URL.Path != "" {
-			c.File("web/dist/index.html")
+			c.File(frontendIndexPath())
 		}
 	})
 

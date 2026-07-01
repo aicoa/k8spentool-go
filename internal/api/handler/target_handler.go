@@ -1,7 +1,11 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,14 +19,77 @@ import (
 type TargetHandler struct {
 	hub      *ws.Hub
 	sessions map[string]*engine.SessionState
+	storeDir string
 	mu       sync.RWMutex
 }
 
 func NewTargetHandler(hub *ws.Hub) *TargetHandler {
-	return &TargetHandler{
+	h := &TargetHandler{
 		hub:      hub,
 		sessions: make(map[string]*engine.SessionState),
 	}
+	h.initPersistence()
+	return h
+}
+
+func targetStoreDir() string {
+	if v := os.Getenv("K8SPEN_TARGETS_DIR"); strings.TrimSpace(v) != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".k8spen/targets"
+	}
+	return filepath.Join(home, ".k8spen", "targets")
+}
+
+func (h *TargetHandler) initPersistence() {
+	h.storeDir = targetStoreDir()
+	_ = os.MkdirAll(h.storeDir, 0700)
+
+	entries, err := os.ReadDir(h.storeDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		body, readErr := os.ReadFile(filepath.Join(h.storeDir, entry.Name()))
+		if readErr != nil {
+			continue
+		}
+		var state engine.SessionState
+		if err := json.Unmarshal(body, &state); err != nil {
+			continue
+		}
+		if state.Target == nil || state.Target.ID == "" {
+			continue
+		}
+		if state.PhaseResults == nil {
+			state.PhaseResults = make(map[engine.AttackPhase][]engine.StepResult)
+		}
+		h.sessions[state.Target.ID] = &state
+	}
+}
+
+func (h *TargetHandler) saveSession(session *engine.SessionState) {
+	if session == nil || session.Target == nil || session.Target.ID == "" {
+		return
+	}
+	snapshot := session.Snapshot()
+	body, err := json.Marshal(snapshot)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(h.storeDir, snapshot.Target.ID+".json"), body, 0600)
+}
+
+func (h *TargetHandler) deleteSessionFile(id string) {
+	if strings.TrimSpace(id) == "" {
+		return
+	}
+	_ = os.Remove(filepath.Join(h.storeDir, id+".json"))
 }
 
 type CreateTargetRequest struct {
@@ -75,13 +142,17 @@ func (h *TargetHandler) CreateTarget(c *gin.Context) {
 
 	h.mu.Lock()
 	h.sessions[target.ID] = engine.NewSessionState(target)
+	created := h.sessions[target.ID]
 	h.mu.Unlock()
+	h.saveSession(created)
 
-	h.hub.Broadcast(&ws.Message{
-		Type:     ws.MsgStatus,
-		TargetID: target.ID,
-		Payload:  gin.H{"status": "created", "host": target.Host},
-	})
+	if h.hub != nil {
+		h.hub.Broadcast(&ws.Message{
+			Type:     ws.MsgStatus,
+			TargetID: target.ID,
+			Payload:  gin.H{"status": "created", "host": target.Host},
+		})
+	}
 
 	c.JSON(http.StatusCreated, target)
 }
@@ -117,6 +188,7 @@ func (h *TargetHandler) DeleteTarget(c *gin.Context) {
 		return
 	}
 	delete(h.sessions, id)
+	h.deleteSessionFile(id)
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
 
@@ -175,6 +247,7 @@ func (h *TargetHandler) RecordStep(c *gin.Context) {
 		Error:     req.Error,
 	}
 	session.AddPhaseResult(result)
+	h.saveSession(session)
 	c.JSON(http.StatusOK, gin.H{"status": "recorded", "target_id": id, "phase": phase.String()})
 }
 

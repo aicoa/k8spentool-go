@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>K8sPenTool-ng API Docs</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"
+      crossorigin="anonymous"
+    />
+    <style>
+      html, body {
+        margin: 0;
+        background: #f5f5f5;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 20px;
+        background: #111827;
+        color: #fff;
+      }
+      .topbar h1 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      .topbar a {
+        color: #93c5fd;
+        text-decoration: none;
+        font-size: 13px;
+      }
+      #swagger-ui {
+        max-width: 1400px;
+        margin: 0 auto;
+      }
+      .fallback {
+        max-width: 960px;
+        margin: 24px auto;
+        padding: 16px 20px;
+        border: 1px solid #d9d9d9;
+        border-radius: 8px;
+        background: #fff;
+        color: #262626;
+      }
+      .fallback code {
+        background: #f5f5f5;
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="topbar">
+      <h1>K8sPenTool-ng API Docs</h1>
+      <a href="/openapi.yaml">Download OpenAPI YAML</a>
+    </div>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js" crossorigin="anonymous"></script>
+    <script>
+      window.addEventListener("load", function () {
+        if (!window.SwaggerUIBundle || !window.SwaggerUIStandalonePreset) {
+          document.getElementById("swagger-ui").innerHTML =
+            '<div class="fallback"><strong>Swagger UI failed to load.</strong><p>The browser could not fetch the CDN assets for the docs shell. You can still use <code>/openapi.json</code> or <code>/openapi.yaml</code> directly.</p></div>';
+          return;
+        }
+        window.ui = window.SwaggerUIBundle({
+          url: "/openapi.json",
+          dom_id: "#swagger-ui",
+          deepLinking: true,
+          docExpansion: "list",
+          displayRequestDuration: true,
+          presets: [
+            window.SwaggerUIBundle.presets.apis,
+            window.SwaggerUIStandalonePreset
+          ],
+          layout: "BaseLayout"
+        });
+      });
+    </script>
+  </body>
+</html>

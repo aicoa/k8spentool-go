@@ -18,6 +18,7 @@ import { api, targetParams, AuthConfig, Target, ProxyConfig } from './services/a
 const { Sider, Content, Footer } = Layout;
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState('access');
   const [host, setHost] = useState('');
   const [token, setToken] = useState('');
   const [username, setUsername] = useState('');
@@ -292,9 +293,14 @@ export default function App() {
       </Sider>
       <Layout>
         <Content>
-          <Tabs defaultActiveKey="access" size="small" type="card" destroyInactiveTabPane={false}>
+          <Tabs activeKey={activeTab} onChange={setActiveTab} size="small" type="card" destroyInactiveTabPane={false}>
             <Tabs.TabPane tab={<span><ThunderboltOutlined />初始访问</span>} key="access">
-              <AccessTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
+              <AccessTab
+                getAuth={getAuth}
+                addLog={addLog}
+                activeTarget={activeTarget}
+                onOpenDashboard={() => setActiveTab('dashboard')}
+              />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><CodeOutlined />命令执行</span>} key="exec">
               <ExecTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />

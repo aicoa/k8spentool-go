@@ -1,11 +1,17 @@
 import React, { useState } from 'react';
-import { Button, Card, Input, Space, Select } from 'antd';
+import { Button, Card, Input, Space, Select, Typography } from 'antd';
+import { ThunderboltOutlined } from '@ant-design/icons';
 import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
+interface Props {
+  getAuth: () => import('../services/api').AuthConfig;
+  addLog: (msg: string) => void;
+  activeTarget: string | null;
+  onOpenDashboard: () => void;
+}
 
-export default function AccessTab({ getAuth, addLog, activeTarget }: Props) {
+export default function AccessTab({ getAuth, addLog, activeTarget, onOpenDashboard }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [customPath, setCustomPath] = useState('/api/v1/namespaces/default/secrets');
@@ -88,7 +94,15 @@ export default function AccessTab({ getAuth, addLog, activeTarget }: Props) {
       </Card>
       <Card title="Dashboard与Kubeconfig" size="small">
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Button onClick={() => run(() => api.access.dashboard(t), 'Dashboard check')}>检测Dashboard</Button>
+          <Button type="primary" icon={<ThunderboltOutlined />} onClick={() => {
+            addLog('[+] 跳转到 Dashboard 面板');
+            onOpenDashboard();
+          }}>
+            打开 Dashboard 专用面板
+          </Button>
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+            Dashboard 的发现、探测、Token 提取已经统一收敛到独立的 Dashboard 标签页。
+          </Typography.Text>
           <Button onClick={() => {
             const kc = prompt('粘贴 Kubeconfig 内容:');
             if (kc) run(() => api.access.kubeconfigParse(kc), 'Kubeconfig parse');

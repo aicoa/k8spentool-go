@@ -316,34 +316,15 @@ func (h *AccessHandler) EtcdReadKey(c *gin.Context) {
 
 // Dashboard
 func (h *AccessHandler) CheckDashboard(c *gin.Context) {
-	var req struct {
-		TargetHost string `json:"target_host" binding:"required"`
-		Port       int    `json:"port"`
-		UseHTTPS   bool   `json:"use_https"`
-		TimeoutSec int    `json:"timeout_sec"`
-		SkipTLS    bool   `json:"skip_tls"`
-	}
+	var req legacyDashboardProbeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Port == 0 {
-		req.Port = 30443
-	}
-	if req.TimeoutSec == 0 {
-		req.TimeoutSec = 10
-	}
-	scheme := "http"
-	if req.UseHTTPS {
-		scheme = "https"
-	}
-	url := fmt.Sprintf("%s://%s:%d/api/v1/csrftoken/login", scheme, req.TargetHost, req.Port)
-	code, body, err := util.SendRequest(url, "GET", "", req.TimeoutSec, req.SkipTLS)
-	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"accessible": false, "error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"accessible": true, "status_code": code, "body": util.FormatResponse(code, body)})
+	result := NewDashboardHandler().executeProbe(mapLegacyDashboardProbeRequest(req))
+	result["deprecated"] = true
+	result["preferred_endpoint"] = "/api/v1/dashboard/probe"
+	c.JSON(http.StatusOK, result)
 }
 
 // Kubeconfig

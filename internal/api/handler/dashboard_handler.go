@@ -238,14 +238,18 @@ type dashboardProbeRequest struct {
 	DashboardPath string `json:"dashboard_path"`
 	SkipTLS       bool   `json:"skip_tls"`
 	TimeoutSec    int    `json:"timeout_sec"`
+	UseHTTPS      *bool  `json:"use_https,omitempty"`
 }
 
-func (h *DashboardHandler) Probe(c *gin.Context) {
-	var req dashboardProbeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+type legacyDashboardProbeRequest struct {
+	TargetHost string `json:"target_host" binding:"required"`
+	Port       int    `json:"port"`
+	UseHTTPS   bool   `json:"use_https"`
+	TimeoutSec int    `json:"timeout_sec"`
+	SkipTLS    bool   `json:"skip_tls"`
+}
+
+func normalizeDashboardProbeRequest(req *dashboardProbeRequest) {
 	if req.DashboardPort == 0 {
 		req.DashboardPort = 443
 	}
@@ -255,112 +259,159 @@ func (h *DashboardHandler) Probe(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 8
 	}
+}
+
+func mapLegacyDashboardProbeRequest(req legacyDashboardProbeRequest) dashboardProbeRequest {
+	useHTTPS := req.UseHTTPS
+	port := req.Port
+	if port == 0 {
+		port = 30443
+	}
+	return dashboardProbeRequest{
+		TargetHost:    req.TargetHost,
+		DashboardPort: port,
+		DashboardPath: "/api/v1/csrftoken/login/",
+		SkipTLS:       req.SkipTLS,
+		TimeoutSec:    req.TimeoutSec,
+		UseHTTPS:      &useHTTPS,
+	}
+}
+
+func candidateDashboardPorts(port int) []int {
+	ports := []int{port}
+	if port == 443 {
+		ports = append(ports, 8443, 30000, 30001, 30443)
+	}
+	return ports
+}
+
+func candidateDashboardPaths(customPath string) []string {
+	paths := make([]string, 0, 5)
+	seen := make(map[string]struct{})
+	addPath := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	addPath(customPath)
+	addPath("/")
+	addPath("/api/v1/")
+	addPath("/api/v1/csrftoken/login/")
+	addPath("/api/v1/namespaces")
+	return paths
+}
+
+func candidateSchemesForDashboardPort(port int, useHTTPS *bool) []string {
+	if useHTTPS != nil {
+		if *useHTTPS {
+			return []string{"https"}
+		}
+		return []string{"http"}
+	}
+	switch port {
+	case 30000, 30001:
+		return []string{"http", "https"}
+	case 443, 8443, 30443:
+		return []string{"https", "http"}
+	default:
+		return []string{"https", "http"}
+	}
+}
+
+func (h *DashboardHandler) executeProbe(req dashboardProbeRequest) gin.H {
+	normalizeDashboardProbeRequest(&req)
 
 	httpClient := util.BuildHTTPClient(req.SkipTLS, req.TimeoutSec)
-
-	// Test paths
-	paths := []string{
-		"/",
-		"/api/v1/",
-		"/api/v1/csrftoken/login/",
-		"/api/v1/namespaces",
-	}
-
-	// Also test common ports for non-443
-	ports := []int{req.DashboardPort}
-	if req.DashboardPort == 443 {
-		ports = append(ports, 8443, 30000, 30001)
-	}
-
 	results := make([]gin.H, 0)
 	accessible := false
 	skipLoginAvailable := false
 	authBypassPossible := false
 	var accessibleURL, version string
 
-	for _, port := range ports {
-		scheme := "https"
-		if port == 30000 || port == 30001 {
-			scheme = "http" // some old dashboards on NodePort
-		}
+	for _, port := range candidateDashboardPorts(req.DashboardPort) {
+		for _, scheme := range candidateSchemesForDashboardPort(port, req.UseHTTPS) {
+			for _, path := range candidateDashboardPaths(req.DashboardPath) {
+				url := fmt.Sprintf("%s://%s:%d%s", scheme, req.TargetHost, port, path)
+				resp, err := httpClient.Get(url)
+				if err != nil {
+					continue
+				}
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+				resp.Body.Close()
+				bodyStr := string(body)
 
-		for _, path := range paths {
-			url := fmt.Sprintf("%s://%s:%d%s", scheme, req.TargetHost, port, path)
-			resp, err := httpClient.Get(url)
-			if err != nil {
-				continue
-			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-			bodyStr := string(body)
-
-			result := gin.H{
-				"url":          url,
-				"status_code":  resp.StatusCode,
-				"content_type": resp.Header.Get("Content-Type"),
-				"body_preview": truncate(bodyStr, 500),
-			}
-
-			// Detect dashboard
-			if strings.Contains(bodyStr, "kubernetes-dashboard") ||
-				strings.Contains(bodyStr, "Dashboard") ||
-				strings.Contains(bodyStr, "k8s-dashboard") ||
-				strings.Contains(bodyStr, "KDASH") {
-
-				result["is_dashboard"] = true
-				result["accessible"] = true
-				accessible = true
-				accessibleURL = url
-
-				// Try to detect version
-				re := regexp.MustCompile(`v(\d+\.\d+\.\d+)`)
-				if match := re.FindStringSubmatch(bodyStr); len(match) > 1 {
-					version = match[1]
-					result["version"] = version
+				result := gin.H{
+					"url":          url,
+					"status_code":  resp.StatusCode,
+					"content_type": resp.Header.Get("Content-Type"),
+					"body_preview": truncate(bodyStr, 500),
 				}
 
-				// Check for login skip
-				if path == "/api/v1/" && resp.StatusCode == 200 {
-					result["auth_bypass_possible"] = "Dashboard API accessible without authentication"
-					authBypassPossible = true
+				// Detect dashboard
+				if strings.Contains(bodyStr, "kubernetes-dashboard") ||
+					strings.Contains(bodyStr, "Dashboard") ||
+					strings.Contains(bodyStr, "k8s-dashboard") ||
+					strings.Contains(bodyStr, "KDASH") {
+
+					result["is_dashboard"] = true
+					result["accessible"] = true
+					accessible = true
+					accessibleURL = url
+
+					// Try to detect version
+					re := regexp.MustCompile(`v(\d+\.\d+\.\d+)`)
+					if match := re.FindStringSubmatch(bodyStr); len(match) > 1 {
+						version = match[1]
+						result["version"] = version
+					}
+
+					// Check for login skip
+					if path == "/api/v1/" && resp.StatusCode == 200 {
+						result["auth_bypass_possible"] = "Dashboard API accessible without authentication"
+						authBypassPossible = true
+					}
 				}
-			}
 
-			// Check for skip-login page
-			if detectDashboardSkipLogin(path, bodyStr) {
-				result["skip_login_available"] = true
-				skipLoginAvailable = true
-			}
+				// Check for skip-login page
+				if detectDashboardSkipLogin(path, bodyStr) {
+					result["skip_login_available"] = true
+					skipLoginAvailable = true
+				}
 
-			results = append(results, result)
+				results = append(results, result)
+			}
 		}
 	}
 
-	// Try anonymous access to K8s API through potential API proxy
-	if accessible && strings.Contains(accessibleURL, "/namespaces") {
-		result := gin.H{
-			"accessible":           true,
-			"url":                  accessibleURL,
-			"version":              version,
-			"probe_results":        results,
-			"attack_steps":         h.getAttackSteps(req.TargetHost),
-			"skip_login_available": skipLoginAvailable,
-			"auth_bypass_possible": authBypassPossible,
-		}
-		c.JSON(http.StatusOK, result)
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
+	return gin.H{
 		"accessible":           accessible,
 		"url":                  accessibleURL,
 		"version":              version,
 		"probe_results":        results,
 		"attack_steps":         h.getAttackSteps(req.TargetHost),
 		"discovery_count":      len(results),
+		"api_proxy_accessible": accessible && strings.Contains(accessibleURL, "/namespaces"),
 		"skip_login_available": skipLoginAvailable,
 		"auth_bypass_possible": authBypassPossible,
-	})
+	}
+}
+
+func (h *DashboardHandler) Probe(c *gin.Context) {
+	var req dashboardProbeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, h.executeProbe(req))
 }
 
 func (h *DashboardHandler) getAttackSteps(targetHost string) []gin.H {

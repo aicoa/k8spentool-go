@@ -99,7 +99,6 @@ export const api = {
     etcdRead: (data: object) => post('/access/etcd/read', data),
     etcdV3Keys: (data: object) => post('/access/etcd/v3/keys', data),
     etcdV3SearchSecrets: (data: object) => post('/access/etcd/v3/search-secrets', data),
-    dashboard: (data: object) => post('/access/dashboard', data),
     kubeconfigParse: (content: string) => post('/access/kubeconfig/parse', { content }),
   },
   exec: {

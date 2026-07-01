@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -58,5 +59,57 @@ func TestDetectDashboardSkipLogin(t *testing.T) {
 				t.Fatalf("expected %v, got %v", tt.want, got)
 			}
 		})
+	}
+}
+
+func TestMapLegacyDashboardProbeRequestUsesLegacyDefaults(t *testing.T) {
+	got := mapLegacyDashboardProbeRequest(legacyDashboardProbeRequest{
+		TargetHost: "demo.local",
+		SkipTLS:    true,
+	})
+	if got.TargetHost != "demo.local" {
+		t.Fatalf("expected target host to be preserved, got %q", got.TargetHost)
+	}
+	if got.DashboardPort != 30443 {
+		t.Fatalf("expected legacy default port 30443, got %d", got.DashboardPort)
+	}
+	if got.DashboardPath != "/api/v1/csrftoken/login/" {
+		t.Fatalf("expected legacy path to be preserved, got %q", got.DashboardPath)
+	}
+	if got.UseHTTPS == nil || *got.UseHTTPS {
+		t.Fatalf("expected use_https=false to be carried into shared probe request")
+	}
+}
+
+func TestCandidateDashboardPathsIncludesCustomPathOnce(t *testing.T) {
+	got := candidateDashboardPaths("api/v1/csrftoken/login/")
+	want := []string{
+		"/api/v1/csrftoken/login/",
+		"/",
+		"/api/v1/",
+		"/api/v1/namespaces",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+}
+
+func TestCandidateSchemesForDashboardPort(t *testing.T) {
+	useHTTPS := true
+	if got := candidateSchemesForDashboardPort(30443, &useHTTPS); !reflect.DeepEqual(got, []string{"https"}) {
+		t.Fatalf("expected forced https, got %v", got)
+	}
+
+	useHTTPS = false
+	if got := candidateSchemesForDashboardPort(30443, &useHTTPS); !reflect.DeepEqual(got, []string{"http"}) {
+		t.Fatalf("expected forced http, got %v", got)
+	}
+
+	if got := candidateSchemesForDashboardPort(30000, nil); !reflect.DeepEqual(got, []string{"http", "https"}) {
+		t.Fatalf("expected http-first for nodeport, got %v", got)
+	}
+
+	if got := candidateSchemesForDashboardPort(443, nil); !reflect.DeepEqual(got, []string{"https", "http"}) {
+		t.Fatalf("expected https-first for 443, got %v", got)
 	}
 }
