@@ -216,6 +216,10 @@ func BuildBackdoorPod(name, namespace, image, mountPath, nodeName string) *corev
 // BuildCronJobBackdoor creates a CronJob backdoor spec
 func BuildCronJobBackdoor(name, namespace, image, schedule, command string) *batchv1.CronJob {
 	return &batchv1.CronJob{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "batch/v1",
+			Kind:       "CronJob",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
@@ -253,6 +257,10 @@ func BuildDaemonSetBackdoorYAML(name, namespace, image, mountPath, command strin
 func buildDaemonSetBackdoorObject(name, namespace, image, mountPath, command string) *appsv1.DaemonSet {
 	privileged := true
 	ds := &appsv1.DaemonSet{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "DaemonSet",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,

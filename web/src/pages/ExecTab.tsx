@@ -23,27 +23,36 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
   const [uploadRemotePath, setUploadRemotePath] = useState('');
   // Pod list cache — persists across exec calls
   const [podListCache, setPodListCache] = useState<any[] | null>(null);
+  const [podListExpanded, setPodListExpanded] = useState(false);
 
   const run = async (fn: () => Promise<any>, label: string, cachePods?: boolean) => {
-    setLoading(true); setResult(null);
+    setLoading(true);
+    // Don't clear previous result when just listing pods (to avoid overwriting exec output)
+    if (!cachePods) setResult(null);
     try {
       const r = await fn();
-      if (cachePods && r.pods) { setPodListCache(r.pods); }
-      // Humanize exit codes in output
-      if (r?.output && typeof r.output === 'string') {
-        const m = r.output.match(/exit code (\d+)/);
-        if (m) {
-          const codes: Record<string, string> = {
-            '1': '通用错误', '2': '语法错误', '126': '无执行权限', '127': '命令未找到 (容器可能无此工具)',
-            '128': '无效退出', '130': 'Ctrl+C 中断', '137': 'SIGKILL (OOM?)', '143': 'SIGTERM',
-          };
-          const code = m[1];
-          const hint = codes[code] || '';
-          r._exit_hint = `exit code ${code}${hint ? ': ' + hint : ''}`;
-          if (code === '127') r._exit_hint += ' → 试试 which curl; which wget; which ss; ls /bin/';
+      if (cachePods && r.pods) {
+        setPodListCache(r.pods);
+        setPodListExpanded(false); // reset expand on new list
+        addLog(`[+] ${label}: ${r.total || r.pods.length} pods`);
+        // Don't replace the output card with pod list data
+      } else {
+        // Humanize exit codes in output
+        if (r?.output && typeof r.output === 'string') {
+          const m = r.output.match(/exit code (\d+)/);
+          if (m) {
+            const codes: Record<string, string> = {
+              '1': '通用错误', '2': '语法错误', '126': '无执行权限', '127': '命令未找到 (容器可能无此工具)',
+              '128': '无效退出', '130': 'Ctrl+C 中断', '137': 'SIGKILL (OOM?)', '143': 'SIGTERM',
+            };
+            const code = m[1];
+            const hint = codes[code] || '';
+            r._exit_hint = `exit code ${code}${hint ? ': ' + hint : ''}`;
+            if (code === '127') r._exit_hint += ' → 试试 which curl; which wget; which ss; ls /bin/';
+          }
         }
+        setResult(r);
       }
-      setResult(r); addLog(`[+] ${label}`);
       recordTargetStep(activeTarget, {
         phase: 'exec',
         tool: 'exec',
@@ -131,19 +140,26 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
             <Button onClick={() => run(() => api.exec.rbacCheck(t), 'RBAC check')}>RBAC检测</Button>
             <Button onClick={checkTools} disabled={!pod} style={{ color: '#52c41a' }}>🔍 探测可用工具</Button>
           </Space>
-          {/* Pod list quick-select */}
+          {/* Pod list quick-select — persists independently from exec output */}
           {podListCache && podListCache.length > 0 && (
-            <div style={{ maxHeight: 180, overflow: 'auto', marginTop: 4 }}>
-              <Text type="secondary" style={{ fontSize: 11 }}>已缓存 {podListCache.length} 个Pod (点击选择):</Text>
+            <div style={{ maxHeight: podListExpanded ? 400 : 180, overflow: 'auto', marginTop: 4 }}>
+              <Space>
+                <Text type="secondary" style={{ fontSize: 11 }}>已缓存 {podListCache.length} 个Pod (点击选择):</Text>
+                {podListCache.length > 50 && (
+                  <Button size="small" type="link" style={{ fontSize: 10, padding: 0 }}
+                    onClick={() => setPodListExpanded(!podListExpanded)}>
+                    {podListExpanded ? '收起' : `展开全部 (剩余 ${podListCache.length - 50} 个)`}
+                  </Button>
+                )}
+              </Space>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
-                {podListCache.slice(0, 50).map((p: any, i: number) => (
+                {(podListExpanded ? podListCache : podListCache.slice(0, 50)).map((p: any, i: number) => (
                   <Tag key={i} color={pod === p.name && ns === p.namespace ? 'blue' : 'default'}
                     style={{ cursor: 'pointer' }}
                     onClick={() => selectPod(p.name, p.namespace)}>
                     {p.namespace}/{p.name}
                   </Tag>
                 ))}
-                {podListCache.length > 50 && <Text type="secondary" style={{ fontSize: 11 }}>...还有 {podListCache.length - 50} 个</Text>}
               </div>
             </div>
           )}

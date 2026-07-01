@@ -39,6 +39,8 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
   const [plan, setPlan] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionPage, setSessionPage] = useState(1);
+  const [sessionPageSize, setSessionPageSize] = useState(10);
 
   // LLM config
   const [llmProvider, setLlmProvider] = useState('openai');
@@ -128,7 +130,11 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
     try {
       const r = await api.ai.getSession(id);
       setSessionId(r.id);
-      setPendingActions(r.pending_actions || []);
+      // Old sessions may have stale pending_actions. Only keep unresolved ones.
+      const unresolved = (r.pending_actions || []).filter(
+        (a: any) => a.status !== 'completed' && a.status !== 'cancelled'
+      );
+      setPendingActions(unresolved);
       setPlan(r.plan || null);
       setMessages(historyToMessages(r.history));
       addLog('[AI] Session loaded: ' + id);
@@ -338,6 +344,19 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
           loading={sessionLoading}
           dataSource={sessions}
           locale={{ emptyText: '暂无 AI sessions，先点 Start Session 创建一个' }}
+          pagination={{
+            current: sessionPage,
+            pageSize: sessionPageSize,
+            total: sessions.length,
+            showSizeChanger: true,
+            pageSizeOptions: ['10', '20', '30', '50'],
+            showTotal: (total: number) => `共 ${total} 个 session`,
+            onChange: (page: number) => setSessionPage(page),
+            onShowSizeChange: (_current: number, size: number) => {
+              setSessionPage(1);
+              setSessionPageSize(size);
+            },
+          }}
           renderItem={(session) => (
             <List.Item
               style={{
