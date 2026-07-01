@@ -233,7 +233,13 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
           dataSource={normalized}
           columns={cols}
           size="small"
-          pagination={(normalized.length > 20 ? { pageSize: 10, size: 'small' } : false)}
+          pagination={(normalized.length > 20 ? {
+            defaultPageSize: 10,
+            pageSizeOptions: ['10', '20', '30', '50', '100'],
+            showSizeChanger: true,
+            showTotal: (total: number) => `共 ${total} 条`,
+            size: 'small',
+          } : false)}
           rowKey="_key"
           scroll={{ x: 'max-content' }}
           style={{ marginTop: 6 }}
@@ -260,7 +266,13 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
             dataSource={normalized}
             columns={cols}
             size="small"
-            pagination={(normalized.length > 20 ? { pageSize: 10, size: 'small' } : false)}
+            pagination={(normalized.length > 20 ? {
+            defaultPageSize: 10,
+            pageSizeOptions: ['10', '20', '30', '50', '100'],
+            showSizeChanger: true,
+            showTotal: (total: number) => `共 ${total} 条`,
+            size: 'small',
+          } : false)}
             rowKey="_key"
             scroll={{ x: 'max-content' }}
             style={{ marginTop: 6 }}
