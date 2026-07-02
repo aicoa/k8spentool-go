@@ -1197,7 +1197,11 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 
 	pods, err := client.ListPods(ctx, "")
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": "list pods failed: " + err.Error()})
+		c.JSON(http.StatusOK, gin.H{
+			"error":       "list pods failed: " + err.Error(),
+			"target_host": req.TargetHost,
+			"hint":        "Check that the target is reachable and credentials have permission to list pods across all namespaces.",
+		})
 		return
 	}
 	steps = append(steps, gin.H{"step": 1, "action": "list_pods", "result": fmt.Sprintf("found %d pods", len(pods.Items))})
@@ -1329,6 +1333,10 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 		"evidence":               evidence,
 		"host_fs_mounted":        hostFSMounted,
 		"host_container_created": hostContainerCreated,
+	}
+	if execErr != nil {
+		resp["error"] = "exec into pod failed: " + execErr.Error()
+		resp["full_output"] = out
 	}
 	if hostFSMounted && !escaped {
 		resp["note"] = "宿主机文件系统已挂载，但还没有看到明确的宿主机 shell / chroot 成功证据。"
