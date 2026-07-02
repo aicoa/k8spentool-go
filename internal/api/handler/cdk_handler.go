@@ -1237,7 +1237,7 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 			reasons = append(reasons, "hostNetwork")
 		}
 		for _, c := range pod.Spec.Containers {
-			if c.SecurityContext != nil {
+			if c.SecurityContext != nil && c.SecurityContext.Capabilities != nil {
 				for _, cap := range c.SecurityContext.Capabilities.Add {
 					if string(cap) == "SYS_ADMIN" {
 						score += 80
