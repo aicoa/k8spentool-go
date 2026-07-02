@@ -1065,7 +1065,12 @@ NET=$(ss -tlnp 2>/dev/null | tail -n +2 | head -6 | awk '{print $4}' | tr '\n' '
 echo "{\"check\":\"network_listening\",\"result\":\"$NET\"}"
 echo "=== CDK EVALUATE END ==="
 `
-	result, err := client.ExecInPodResult(ctx, req.Namespace, req.PodName, "", []string{"sh", "-c", evalScript})
+	// Resolve container name for multi-container pods
+		containerName := ""
+		if pod, getErr := client.GetPod(ctx, req.Namespace, req.PodName); getErr == nil && len(pod.Spec.Containers) > 0 {
+			containerName = pod.Spec.Containers[0].Name
+		}
+		result, err := client.ExecInPodResult(ctx, req.Namespace, req.PodName, containerName, []string{"sh", "-c", evalScript})
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": "exec failed: " + err.Error(), "pod": req.PodName, "namespace": req.Namespace})
 		return
@@ -1293,7 +1298,11 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 		method = "manual_only"
 	}
 
-	escResult, execErr := client.ExecInPodResult(execCtx, target.pod.Namespace, target.pod.Name, "", []string{"sh", "-c", escapeCmd})
+	containerName := ""
+		if len(target.pod.Spec.Containers) > 0 {
+			containerName = target.pod.Spec.Containers[0].Name
+		}
+		escResult, execErr := client.ExecInPodResult(execCtx, target.pod.Namespace, target.pod.Name, containerName, []string{"sh", "-c", escapeCmd})
 	out := ""
 	if execErr != nil {
 		out = "exec error: " + execErr.Error()
