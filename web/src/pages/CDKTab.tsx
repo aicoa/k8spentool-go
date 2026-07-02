@@ -145,8 +145,9 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
         />
       )}
       <Button disabled={!evalPod} onClick={() => {
-        onSelectSharedPod({ namespace: evalNs || 'default', name: evalPod });
-        run(() => api.cdk.evaluatePod({ ...t, namespace: evalNs, pod_name: evalPod }), 'Evaluate pod', 'info');
+        const targetNs = sharedPodSelection?.namespace || evalNs || 'default';
+        onSelectSharedPod({ namespace: targetNs, name: evalPod });
+        run(() => api.cdk.evaluatePod({ ...t, namespace: targetNs, pod_name: evalPod }), 'Evaluate pod', 'info');
       }}>Evaluate Pod (CDK)</Button>
       <Text type="secondary" style={{ fontSize: 10 }}>在选中的 Pod 内执行 CDK evaluate，自动检查 seccomp、docker.sock、hostPath、敏感文件与 SA Token。</Text>
     </Space></Card>
