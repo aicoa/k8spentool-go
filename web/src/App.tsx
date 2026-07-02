@@ -13,9 +13,10 @@ import AITab from './pages/AITab';
 import CDKTab from './pages/CDKTab';
 import DashboardTab from './pages/DashboardTab';
 import LogPanel from './components/LogPanel';
-import { api, targetParams, AuthConfig, Target, ProxyConfig } from './services/api';
+import { api, targetParams, AuthConfig, Target, ProxyConfig, PodRecord, PodListSource, PodSelection, SharedPodContext } from './services/api';
 
 const { Sider, Content, Footer } = Layout;
+const ACTIVE_TARGET_STORAGE_KEY = 'k8spen.activeTargetId';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('access');
@@ -23,7 +24,7 @@ export default function App() {
   const [token, setToken] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [authMode, setAuthMode] = useState<'token' | 'userpass'>('userpass');
+  const [authMode, setAuthMode] = useState<'token' | 'userpass' | 'none'>('none');
   const [skipTLS, setSkipTLS] = useState(true);
   const [timeout, setTimeout_] = useState(10);
   const [targets, setTargets] = useState<Target[]>([]);
@@ -35,6 +36,130 @@ export default function App() {
   const [proxyUser, setProxyUser] = useState('');
   const [proxyPass, setProxyPass] = useState('');
   const [proxyLoading, setProxyLoading] = useState(false);
+  const [sharedPodsByTarget, setSharedPodsByTarget] = useState<Record<string, SharedPodContext>>({});
+  const [sharedPodSelectionByTarget, setSharedPodSelectionByTarget] = useState<Record<string, PodSelection | null>>({});
+
+  const getStoredActiveTargetId = () => {
+    if (typeof window === 'undefined') return '';
+    return window.localStorage.getItem(ACTIVE_TARGET_STORAGE_KEY) || '';
+  };
+
+  const setStoredActiveTargetId = (targetId: string) => {
+    if (typeof window === 'undefined') return;
+    if (!targetId) {
+      window.localStorage.removeItem(ACTIVE_TARGET_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(ACTIVE_TARGET_STORAGE_KEY, targetId);
+  };
+
+  const currentPodContextKey = activeTarget || host.trim() || 'default';
+  const sharedPodContext = sharedPodsByTarget[currentPodContextKey] || null;
+  const sharedPodSelection = sharedPodSelectionByTarget[currentPodContextKey] || null;
+
+  const normalizeNamespace = (value?: string) => value?.trim() || 'default';
+
+  const migrateSharedPodState = (fromKey: string, toKey: string) => {
+    if (!fromKey || !toKey || fromKey === toKey) return;
+    setSharedPodsByTarget((prev) => {
+      if (!prev[fromKey] || prev[toKey]) return prev;
+      const next = { ...prev, [toKey]: prev[fromKey] };
+      delete next[fromKey];
+      return next;
+    });
+    setSharedPodSelectionByTarget((prev) => {
+      if (!(fromKey in prev) || toKey in prev) return prev;
+      const next = { ...prev, [toKey]: prev[fromKey] };
+      delete next[fromKey];
+      return next;
+    });
+  };
+
+  const clearSharedPodState = (key: string) => {
+    if (!key) return;
+    setSharedPodsByTarget((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setSharedPodSelectionByTarget((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const selectSharedPod = (selection: PodSelection | null) => {
+    if (!currentPodContextKey) return;
+    setSharedPodSelectionByTarget((prev) => ({
+      ...prev,
+      [currentPodContextKey]: selection ? {
+        namespace: normalizeNamespace(selection.namespace),
+        name: selection.name,
+        container: selection.container,
+      } : null,
+    }));
+  };
+
+  const updateSharedPods = (pods: PodRecord[], source: PodListSource, options?: { namespaceFilter?: string; autoSelectFirst?: boolean }) => {
+    if (!currentPodContextKey) return;
+    setSharedPodsByTarget((prev) => ({
+      ...prev,
+      [currentPodContextKey]: {
+        pods,
+        source,
+        updated_at: new Date().toISOString(),
+        namespace_filter: options?.namespaceFilter,
+      },
+    }));
+    setSharedPodSelectionByTarget((prev) => {
+      const current = prev[currentPodContextKey];
+      const stillExists = current && pods.some((item) => item.name === current.name && normalizeNamespace(item.namespace) === normalizeNamespace(current.namespace));
+      if (stillExists) return prev;
+      if (options?.autoSelectFirst && pods.length > 0) {
+        return {
+          ...prev,
+          [currentPodContextKey]: {
+            namespace: normalizeNamespace(pods[0].namespace),
+            name: pods[0].name,
+          },
+        };
+      }
+      if (!current) return prev;
+      return { ...prev, [currentPodContextKey]: null };
+    });
+  };
+
+  const applyTarget = (t: Target, options?: { log?: boolean }) => {
+    migrateSharedPodState(t.host, t.id);
+    setHost(t.host);
+    setActiveTarget(t.id);
+    setStoredActiveTargetId(t.id);
+    setSkipTLS(t.skip_tls ?? true);
+    setTimeout_(t.timeout_sec || 10);
+    if (t.token) {
+      setToken(t.token);
+      setUsername('');
+      setPassword('');
+      setAuthMode('token');
+    } else if (t.username || t.password || t.auth_type === 'userpass') {
+      setToken('');
+      setUsername(t.username || '');
+      setPassword(t.password || '');
+      setAuthMode('userpass');
+    } else {
+      setToken('');
+      setUsername('');
+      setPassword('');
+      setAuthMode('none');
+    }
+    if (options?.log !== false) {
+      const authLabel = t.auth_type === 'token' ? 'token' : t.auth_type === 'userpass' ? (t.username || 'userpass') : 'anonymous';
+      addLog(`[+] 切换目标: ${t.host} (${authLabel})`);
+    }
+  };
 
   // Load proxy config on mount
   useEffect(() => {
@@ -49,7 +174,15 @@ export default function App() {
     }).catch(() => {});
 
     api.targets.list().then((savedTargets: Target[]) => {
-      setTargets(savedTargets || []);
+      const targetList = savedTargets || [];
+      setTargets(targetList);
+      const storedTargetId = getStoredActiveTargetId();
+      const storedTarget = storedTargetId ? targetList.find((item) => item.id === storedTargetId) : undefined;
+      if (storedTarget) {
+        applyTarget(storedTarget, { log: false });
+      } else if (targetList.length === 1) {
+        applyTarget(targetList[0], { log: false });
+      }
     }).catch(() => {});
   }, []);
 
@@ -133,7 +266,9 @@ export default function App() {
       const verifiedPodCount = Number.isFinite(verifyResult?.total) ? verifyResult.total : 0;
 
       // Step 2: Save target
-      const authType = authMode === 'token' ? 'token' : (authMode === 'userpass' ? 'userpass' : 'none');
+      const authType = authMode === 'token' && token
+        ? 'token'
+        : (authMode === 'userpass' && (username || password) ? 'userpass' : 'none');
       const result = await api.targets.create({
         host, port: 6443,
         token: authMode === 'token' ? token : undefined,
@@ -142,7 +277,9 @@ export default function App() {
         skip_tls: skipTLS, timeout_sec: timeout,
         auth_type: authType,
       });
+      if (result.id) migrateSharedPodState(host.trim(), result.id);
       setActiveTarget(result.id || result.host || host);
+      if (result.id) setStoredActiveTargetId(result.id);
       setTargets((prev) => [...prev, result]);
 
       // Step 3: Report auth status
@@ -150,8 +287,9 @@ export default function App() {
         addLog(`[!] ⚠️ ${host} 允许匿名访问！即使凭据错误也能列出资源`);
         message.warning('集群允许匿名访问！凭据可能未生效');
       } else if (authWorks) {
-        addLog(`[+] 目标已验证: ${host} (${authMode === 'userpass' ? '用户名密码' : 'Token'})，共 ${verifiedPodCount} 个Pod`);
-        message.success(`连接成功，已认证 (${verifiedPodCount} pods)`);
+        const authLabel = authType === 'token' ? 'Token' : authType === 'userpass' ? '用户名密码' : '匿名';
+        addLog(`[+] 目标已验证: ${host} (${authLabel})，共 ${verifiedPodCount} 个Pod`);
+        message.success(authType === 'none' ? `匿名连接成功 (${verifiedPodCount} pods)` : `连接成功，已认证 (${verifiedPodCount} pods)`);
       } else if (verifyResult?.error) {
         addLog(`[!] 凭据可能无效: ${host}，但目标仍可访问（可能是匿名）`);
         message.warning('凭据验证失败，但目标可访问（检查是否匿名）');
@@ -165,11 +303,18 @@ export default function App() {
   const handleDeleteTarget = async (target: Target) => {
     try {
       await api.targets.delete(target.id);
-      setTargets((prev) => prev.filter((item) => item.id !== target.id));
+      clearSharedPodState(target.id);
+      const remainingTargets = targets.filter((item) => item.id !== target.id);
+      const switchingToReplacement = activeTarget === target.id && remainingTargets.length > 0;
+      setTargets(remainingTargets);
       if (activeTarget === target.id) {
         setActiveTarget(null);
+        setStoredActiveTargetId('');
+        if (switchingToReplacement) {
+          applyTarget(remainingTargets[0], { log: false });
+        }
       }
-      if (host === target.host) {
+      if (host === target.host && !switchingToReplacement) {
         setHost('');
         setToken('');
         setUsername('');
@@ -187,10 +332,13 @@ export default function App() {
       await Promise.all(targets.map((target) => api.targets.delete(target.id)));
       setTargets([]);
       setActiveTarget(null);
+      setStoredActiveTargetId('');
       setHost('');
       setToken('');
       setUsername('');
       setPassword('');
+      setSharedPodsByTarget({});
+      setSharedPodSelectionByTarget({});
       addLog('[*] 已清空所有保存的 targets');
       message.success('已清空所有 targets');
     } catch (e) {
@@ -211,6 +359,7 @@ export default function App() {
           <Radio.Group value={authMode} onChange={(e) => setAuthMode(e.target.value)}
             style={{ marginBottom: 8, display: 'flex', justifyContent: 'center' }} size="small"
             buttonStyle="solid">
+            <Radio.Button value="none"><SafetyOutlined /> 匿名</Radio.Button>
             <Radio.Button value="userpass"><UserOutlined /> 账号密码</Radio.Button>
             <Radio.Button value="token"><KeyOutlined /> Token</Radio.Button>
           </Radio.Group>
@@ -222,9 +371,13 @@ export default function App() {
               <Input.Password placeholder="密码" value={password} onChange={(e) => setPassword(e.target.value)}
                 prefix={<LockOutlined />} />
             </Space>
-          ) : (
+          ) : authMode === 'token' ? (
             <Input.Password placeholder="Bearer Token" value={token} onChange={(e) => setToken(e.target.value)}
               style={{ marginBottom: 8 }} />
+          ) : (
+            <div style={{ marginBottom: 8, color: '#aaa', fontSize: 11 }}>
+              不使用显式凭据，直接按匿名访问目标 API。
+            </div>
           )}
 
           <Space style={{ marginBottom: 8 }}>
@@ -277,24 +430,7 @@ export default function App() {
             }]}
           />
         </div>
-        <TargetPanel targets={targets} active={activeTarget} onSelect={(t) => {
-            setHost(t.host);
-            setActiveTarget(t.id);
-            setSkipTLS(t.skip_tls ?? true);
-            setTimeout_(t.timeout_sec || 10);
-            if (t.token) {
-              setToken(t.token);
-              setUsername('');
-              setPassword('');
-              setAuthMode('token');
-            } else {
-              setToken('');
-              setUsername(t.username || '');
-              setPassword(t.password || '');
-              setAuthMode('userpass');
-            }
-            addLog(`[+] 切换目标: ${t.host} (${t.username || 'token'})`);
-          }} onDelete={handleDeleteTarget} onClearAll={handleClearTargets} />
+        <TargetPanel targets={targets} active={activeTarget} onSelect={(t) => applyTarget(t)} onDelete={handleDeleteTarget} onClearAll={handleClearTargets} />
       </Sider>
       <Layout>
         <Content>
@@ -305,10 +441,25 @@ export default function App() {
                 addLog={addLog}
                 activeTarget={activeTarget}
                 onOpenDashboard={() => setActiveTab('dashboard')}
+                onOpenExec={() => setActiveTab('exec')}
+                onOpenKubectl={() => setActiveTab('kubectl')}
+                sharedPods={sharedPodContext?.pods || []}
+                sharedPodSource={sharedPodContext?.source || null}
+                sharedPodSelection={sharedPodSelection}
+                onSelectSharedPod={selectSharedPod}
               />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><CodeOutlined />命令执行</span>} key="exec">
-              <ExecTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
+              <ExecTab
+                getAuth={getAuth}
+                addLog={addLog}
+                activeTarget={activeTarget}
+                sharedPods={sharedPodContext?.pods || []}
+                sharedPodSource={sharedPodContext?.source || null}
+                sharedPodSelection={sharedPodSelection}
+                onUpdateSharedPods={updateSharedPods}
+                onSelectSharedPod={selectSharedPod}
+              />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><LockOutlined />权限维持</span>} key="persist">
               <PersistTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
@@ -320,13 +471,39 @@ export default function App() {
               <LateralTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><CloudServerOutlined />kubectl</span>} key="kubectl">
-              <KubectlTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
+              <KubectlTab
+                getAuth={getAuth}
+                addLog={addLog}
+                activeTarget={activeTarget}
+                sharedPods={sharedPodContext?.pods || []}
+                sharedPodSource={sharedPodContext?.source || null}
+                sharedPodSelection={sharedPodSelection}
+                onUpdateSharedPods={updateSharedPods}
+                onSelectSharedPod={selectSharedPod}
+              />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><RobotOutlined />AI助手</span>} key="ai">
-              <AITab getAuth={getAuth} addLog={addLog} host={host} activeTarget={activeTarget} />
+              <AITab
+                getAuth={getAuth}
+                addLog={addLog}
+                host={host}
+                activeTarget={activeTarget}
+                sharedPods={sharedPodContext?.pods || []}
+                sharedPodSource={sharedPodContext?.source || null}
+                sharedPodSelection={sharedPodSelection}
+              />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><BugOutlined />CDK战术</span>} key="cdk">
-              <CDKTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />
+              <CDKTab
+                getAuth={getAuth}
+                addLog={addLog}
+                activeTarget={activeTarget}
+                sharedPods={sharedPodContext?.pods || []}
+                sharedPodSource={sharedPodContext?.source || null}
+                sharedPodSelection={sharedPodSelection}
+                onUpdateSharedPods={updateSharedPods}
+                onSelectSharedPod={selectSharedPod}
+              />
             </Tabs.TabPane>
             <Tabs.TabPane tab={<span><ThunderboltOutlined />Dashboard</span>} key="dashboard">
               <DashboardTab getAuth={getAuth} addLog={addLog} activeTarget={activeTarget} />

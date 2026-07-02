@@ -1,21 +1,35 @@
 import React, { useState } from 'react';
-import { Button, Card, Input, Space } from 'antd';
-import { api, targetParams, recordTargetStep } from '../services/api';
+import { Button, Card, Input, Space, Select, Tag, Typography } from 'antd';
+import { api, targetParams, recordTargetStep, PodListSource, PodRecord, PodSelection } from '../services/api';
 import ResultView from '../components/ResultView';
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
+const { Text } = Typography;
 
-export default function KubectlTab({ getAuth, addLog, activeTarget }: Props) {
+interface Props {
+  getAuth: () => import('../services/api').AuthConfig;
+  addLog: (msg: string) => void;
+  activeTarget: string | null;
+  sharedPods: PodRecord[];
+  sharedPodSource: PodListSource | null;
+  sharedPodSelection: PodSelection | null;
+  onUpdateSharedPods: (pods: PodRecord[], source: PodListSource, options?: { namespaceFilter?: string; autoSelectFirst?: boolean }) => void;
+  onSelectSharedPod: (selection: PodSelection | null) => void;
+}
+
+export default function KubectlTab({ getAuth, addLog, activeTarget, sharedPods, sharedPodSource, sharedPodSelection, onUpdateSharedPods, onSelectSharedPod }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [customCmd, setCustomCmd] = useState('get namespaces');
   const [applyYaml, setApplyYaml] = useState('');
 
-  const run = async (fn: () => Promise<any>, label: string) => {
+  const run = async (fn: () => Promise<any>, label: string, sharePodsSource?: PodListSource) => {
     setLoading(true); setResult(null);
     try {
       const r = await fn();
       setResult(r);
+      if (sharePodsSource && Array.isArray(r?.pods)) {
+        onUpdateSharedPods(r.pods, sharePodsSource, { autoSelectFirst: !sharedPodSelection });
+      }
       addLog(`[+] ${label}`);
       recordTargetStep(activeTarget, {
         phase: 'kubectl',
@@ -43,12 +57,14 @@ export default function KubectlTab({ getAuth, addLog, activeTarget }: Props) {
     finally { setLoading(false); }
   };
   const t = targetParams(getAuth());
+  const sharedPodValue = sharedPodSelection ? `${sharedPodSelection.namespace}/${sharedPodSelection.name}` : undefined;
+  const sharedPodSourceLabel = sharedPodSource === 'kubelet' ? 'Kubelet' : sharedPodSource === 'kubectl' ? 'kubectl' : 'API Server';
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
       <Card title="资源枚举" size="small">
         <Space wrap>
-          <Button onClick={() => run(() => api.kubectl.getPods(t), 'get pods')}>Get Pods</Button>
+          <Button onClick={() => run(() => api.kubectl.getPods(t), 'get pods', 'kubectl')}>Get Pods</Button>
           <Button onClick={() => run(() => api.kubectl.getNodes(t), 'get nodes')}>Get Nodes</Button>
           <Button onClick={() => run(() => api.kubectl.getServices(t), 'get services')}>Get Services</Button>
           <Button onClick={() => run(() => api.kubectl.getDeployments(t), 'get deployments')}>Get Deployments</Button>
@@ -56,6 +72,40 @@ export default function KubectlTab({ getAuth, addLog, activeTarget }: Props) {
           <Button onClick={() => run(() => api.kubectl.getSA(t), 'get sa')}>Get SA</Button>
           <Button onClick={() => run(() => api.kubectl.getCRB(t), 'get crb')}>Get CRB</Button>
           <Button onClick={() => run(() => api.kubectl.getImages(t), 'get images')}>Get Images</Button>
+        </Space>
+      </Card>
+      <Card title="共享 Pod 上下文" size="small">
+        <Space direction="vertical" style={{ width: '100%' }} size={6}>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {sharedPods.length > 0
+              ? `当前已缓存 ${sharedPods.length} 个 Pod（来源: ${sharedPodSourceLabel}）。这里切的当前 Pod，会同步给初始访问和命令执行面板。`
+              : '当前还没有共享 Pod 缓存。点一次 Get Pods，其他面板就能直接复用。'}
+          </Text>
+          {sharedPodSelection && (
+            <Tag color="blue" style={{ width: 'fit-content' }}>
+              当前 Pod: {sharedPodSelection.namespace}/{sharedPodSelection.name}
+            </Tag>
+          )}
+          {sharedPods.length > 0 && (
+            <Select
+              allowClear
+              showSearch
+              value={sharedPodValue}
+              placeholder="选择一个当前 Pod"
+              optionFilterProp="label"
+              style={{ width: '100%' }}
+              onClear={() => onSelectSharedPod(null)}
+              onChange={(value: string, option: any) => {
+                const parts = value.split('/'); const namespace = parts.length > 1 ? parts[0] : 'default'; const podName = parts.length > 1 ? parts[1] : parts[0];
+                onSelectSharedPod({ namespace, name: podName, container: option?.container || undefined });
+              }}
+              options={sharedPods.map((item) => ({
+                value: `${item.namespace}/${item.name}`,
+                label: `${item.namespace}/${item.name}`,
+                container: item.containers?.split(',').map((entry) => entry.trim()).filter(Boolean)[0],
+              }))}
+            />
+          )}
         </Space>
       </Card>
       <Card title="集群信息 & 权限" size="small">

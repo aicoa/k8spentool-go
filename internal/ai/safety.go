@@ -171,7 +171,36 @@ func isDestructiveAction(toolName string, action string) bool {
 			}
 		}
 	}
+	// exec_command runs shell commands inside pods.  Allow read-only recon
+	// commands to pass through; everything else requires human approval.
+	if toolName == "exec_command" {
+		var payload struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(action), &payload); err == nil {
+			verb := firstWord(payload.Command)
+			if isSafePodCommand(verb) {
+				return false
+			}
+		}
+	}
 	return destructiveToolNames[toolName]
+}
+
+// isSafePodCommand returns true for read-only reconnaissance commands
+// that are safe to run inside pods without human approval.
+func isSafePodCommand(verb string) bool {
+	switch verb {
+	case
+		"id", "whoami", "hostname", "pwd", "uname",
+		"ls", "cat", "head", "tail", "grep", "find",
+		"ps", "df", "du", "free", "wc", "stat", "file",
+		"mount", "which", "ss", "netstat", "ip", "ifconfig",
+		"env", "printenv", "echo", "printf",
+		"":
+		return true
+	}
+	return false
 }
 
 func firstWord(s string) string {

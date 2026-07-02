@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ type AISession struct {
 	ID             string              `json:"id"`
 	TargetID       string              `json:"target_id"`
 	Target         *engine.Target      `json:"target,omitempty"`
+	UIContext      *AISessionUIContext `json:"ui_context,omitempty"`
 	Plan           *engine.AttackPlan  `json:"plan,omitempty"`
 	Status         string              `json:"status"`
 	Messages       []ai.Message        `json:"messages,omitempty"`
@@ -29,6 +31,7 @@ type AISession struct {
 	CreatedAt      time.Time           `json:"created_at"`
 	Auth           *ai.AuthCreds       `json:"auth"`
 	mu             sync.RWMutex
+	processing     bool // guard against concurrent Chat requests on the same session
 }
 
 type AIHistoryEntry struct {
@@ -48,6 +51,18 @@ type PendingToolAction struct {
 	CreatedAt        time.Time   `json:"created_at"`
 }
 
+type AISessionPodContext struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Container string `json:"container,omitempty"`
+}
+
+type AISessionUIContext struct {
+	SelectedPod     *AISessionPodContext `json:"selected_pod,omitempty"`
+	SharedPodSource string               `json:"shared_pod_source,omitempty"`
+	SharedPodCount  int                  `json:"shared_pod_count,omitempty"`
+}
+
 type aiChatClient interface {
 	Chat(ctx context.Context, messages []ai.Message, tools []ai.ToolDefinition) (*ai.ChatResponse, error)
 }
@@ -63,6 +78,30 @@ type AIHandler struct {
 
 type aiTargetStore interface {
 	GetSession(id string) (*engine.SessionState, bool)
+}
+
+type aiSessionSummaryResponse struct {
+	ID             string              `json:"id"`
+	TargetID       string              `json:"target_id"`
+	Target         *engine.Target      `json:"target,omitempty"`
+	Status         string              `json:"status"`
+	PendingActions []PendingToolAction `json:"pending_actions,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+	CanResumeChat  bool                `json:"can_resume_chat"`
+}
+
+type aiSessionDetailResponse struct {
+	ID             string              `json:"id"`
+	TargetID       string              `json:"target_id"`
+	Target         *engine.Target      `json:"target,omitempty"`
+	UIContext      *AISessionUIContext `json:"ui_context,omitempty"`
+	Plan           *engine.AttackPlan  `json:"plan,omitempty"`
+	Status         string              `json:"status"`
+	Messages       []ai.Message        `json:"messages,omitempty"`
+	History        []AIHistoryEntry    `json:"history"`
+	PendingActions []PendingToolAction `json:"pending_actions,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+	CanResumeChat  bool                `json:"can_resume_chat"`
 }
 
 func NewAIHandler(targetStore aiTargetStore) *AIHandler {
@@ -95,6 +134,8 @@ func (h *AIHandler) initPersistence() {
 			if len(s.Messages) == 0 && len(s.History) > 0 {
 				s.Messages = buildMessagesFromHistory(s.History)
 			}
+			normalizeSessionStatus(&s)
+			h.hydrateSessionAuth(&s)
 			h.sessions[s.ID] = &s
 		}
 	}
@@ -102,6 +143,14 @@ func (h *AIHandler) initPersistence() {
 }
 
 func (h *AIHandler) saveSession(session *AISession) {
+	// Guard against TOCTOU race with DeleteSession:
+	// if the session was deleted from the map, don't resurrect its file.
+	h.mu.RLock()
+	_, exists := h.sessions[session.ID]
+	h.mu.RUnlock()
+	if !exists {
+		return
+	}
 	session.mu.RLock()
 	data, err := json.Marshal(session)
 	session.mu.RUnlock()
@@ -175,28 +224,33 @@ func (h *AIHandler) UpdateConfig(c *gin.Context) {
 
 func (h *AIHandler) CreateSession(c *gin.Context) {
 	var req struct {
-		TargetID   string `json:"target_id" binding:"required"`
-		Host       string `json:"host"`
-		Token      string `json:"token"`
-		Username   string `json:"username"`
-		Password   string `json:"password"`
-		SkipTLS    bool   `json:"skip_tls"`
-		TimeoutSec int    `json:"timeout_sec"`
+		TargetID   string              `json:"target_id" binding:"required"`
+		Host       string              `json:"host"`
+		Token      string              `json:"token"`
+		Username   string              `json:"username"`
+		Password   string              `json:"password"`
+		SkipTLS    bool                `json:"skip_tls"`
+		TimeoutSec int                 `json:"timeout_sec"`
+		UIContext  *AISessionUIContext `json:"ui_context"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	createdAt := time.Now()
+	initialGreeting := buildInitialSessionGreeting(req.Host, req.TargetID, req.UIContext)
+
 	session := &AISession{
 		ID:             uuid.New().String(),
 		TargetID:       req.TargetID,
 		Target:         h.resolveTargetSnapshot(req.TargetID, req.Host, req.Token, req.Username, req.Password, req.SkipTLS, req.TimeoutSec),
-		Status:         "created",
-		Messages:       make([]ai.Message, 0),
-		History:        make([]AIHistoryEntry, 0),
+		UIContext:      normalizeSessionUIContext(req.UIContext),
+		Status:         "active",
+		Messages:       []ai.Message{{Role: "assistant", Content: initialGreeting}},
+		History:        []AIHistoryEntry{{Role: "assistant", Content: initialGreeting, Timestamp: createdAt}},
 		PendingActions: make([]PendingToolAction, 0),
-		CreatedAt:      time.Now(),
+		CreatedAt:      createdAt,
 		Auth: &ai.AuthCreds{
 			Host:       req.Host,
 			Token:      req.Token,
@@ -211,8 +265,9 @@ func (h *AIHandler) CreateSession(c *gin.Context) {
 	h.sessions[session.ID] = session
 	h.mu.Unlock()
 
+	h.hydrateSessionAuth(session)
 	h.saveSession(session)
-	c.JSON(http.StatusCreated, session)
+	c.JSON(http.StatusCreated, h.sessionDetailResponse(session))
 }
 
 func (h *AIHandler) GetSession(c *gin.Context) {
@@ -224,15 +279,19 @@ func (h *AIHandler) GetSession(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return
 	}
-	c.JSON(http.StatusOK, session)
+	normalizeSessionStatus(session)
+	h.hydrateSessionAuth(session)
+	c.JSON(http.StatusOK, h.sessionDetailResponse(session))
 }
 
 func (h *AIHandler) ListSessions(c *gin.Context) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	sessions := make([]*AISession, 0, len(h.sessions))
+	sessions := make([]aiSessionSummaryResponse, 0, len(h.sessions))
 	for _, s := range h.sessions {
-		sessions = append(sessions, s)
+		normalizeSessionStatus(s)
+		h.hydrateSessionAuth(s)
+		sessions = append(sessions, h.sessionSummaryResponse(s))
 	}
 	c.JSON(http.StatusOK, sessions)
 }
@@ -246,6 +305,25 @@ func (h *AIHandler) Chat(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return
 	}
+	if sessionStopped(session) {
+		c.JSON(http.StatusConflict, gin.H{"error": "session is stopped. Please create a new session to continue."})
+		return
+	}
+
+	// Guard against concurrent Chat requests on the same session.
+	session.mu.Lock()
+	if session.processing {
+		session.mu.Unlock()
+		c.JSON(http.StatusConflict, gin.H{"error": "session is processing another request, please wait"})
+		return
+	}
+	session.processing = true
+	session.mu.Unlock()
+	defer func() {
+		session.mu.Lock()
+		session.processing = false
+		session.mu.Unlock()
+	}()
 
 	var req struct {
 		Message string `json:"message" binding:"required"`
@@ -282,8 +360,7 @@ func (h *AIHandler) Chat(c *gin.Context) {
 	llm := h.GetOrCreateLLMClient()
 	tools := ai.GetOpenAIToolDefinitions()
 
-	// Guard: if Auth is nil (e.g. session reloaded from disk), we can't execute tools
-	if session.Auth == nil {
+	if !h.hydrateSessionAuth(session) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "session auth credentials not available. Please create a new session."})
 		return
 	}
@@ -361,6 +438,37 @@ func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools [
 	safety := ai.DefaultSafetyConfig()
 
 	for round := 0; round < maxRounds; round++ {
+		// Check if session was stopped between Chat() entry and now.
+		session.mu.RLock()
+		stopped := session.Status == "stopped"
+		session.mu.RUnlock()
+		if stopped {
+			if len(traces) > 0 {
+				return &toolLoopOutcome{
+					Messages:       messages,
+					HistoryEntries: historyEntries,
+					Traces:         traces,
+					PendingActions: pendingActions,
+					Response: AIHistoryEntry{
+						Role:      "assistant",
+						Content:   summarizeWithTraces("（会话已被停止，以下为已收集到的证据）", traces),
+						Timestamp: time.Now(),
+					},
+				}, nil
+			}
+			return &toolLoopOutcome{
+				Messages:       messages,
+				HistoryEntries: historyEntries,
+				Traces:         traces,
+				PendingActions: pendingActions,
+				Response: AIHistoryEntry{
+					Role:      "assistant",
+					Content:   "会话已被停止。",
+					Timestamp: time.Now(),
+				},
+			}, nil
+		}
+
 		resp, err := llm.Chat(ctx, messages, tools)
 		if err != nil {
 			// 已执行的工具轨迹仍返回给前端
@@ -548,6 +656,10 @@ func (h *AIHandler) GeneratePlan(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return
 	}
+	if sessionStopped(session) {
+		c.JSON(http.StatusConflict, gin.H{"error": "session is stopped. Please create a new session to continue."})
+		return
+	}
 
 	var req struct {
 		Objective string `json:"objective"`
@@ -623,6 +735,10 @@ func (h *AIHandler) ApproveStep(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
 		return
 	}
+	if sessionStopped(session) {
+		c.JSON(http.StatusConflict, gin.H{"error": "session is stopped. Please create a new session to continue."})
+		return
+	}
 
 	var req struct {
 		StepIndex int    `json:"step_index"`
@@ -665,6 +781,7 @@ func (h *AIHandler) StopSession(c *gin.Context) {
 	}
 	session.mu.Lock()
 	session.Status = "stopped"
+	session.PendingActions = nil
 	session.mu.Unlock()
 	h.saveSession(session)
 	c.JSON(http.StatusOK, gin.H{"status": "stopped"})
@@ -732,12 +849,19 @@ func stripSystemMessage(messages []ai.Message) []ai.Message {
 func (h *AIHandler) buildSystemPrompt(session *AISession) string {
 	target, phase, completedSteps := h.resolvePromptContext(session)
 	if target == nil {
-		return ai.SystemPrompt
+		prompt := ai.SystemPrompt
+		if uiContextMessage := buildSessionUIContextMessage(session.UIContext); uiContextMessage != "" {
+			prompt += "\n\n" + uiContextMessage
+		}
+		return prompt
 	}
 	prompt := ai.BuildSystemMessage(target, phase)
 	contextMessage := ai.BuildContextMessage(completedSteps)
 	if contextMessage != "" {
 		prompt += "\n\n" + contextMessage
+	}
+	if uiContextMessage := buildSessionUIContextMessage(session.UIContext); uiContextMessage != "" {
+		prompt += "\n\n" + uiContextMessage
 	}
 	return prompt
 }
@@ -789,12 +913,228 @@ func (h *AIHandler) resolveTargetSnapshot(targetID, host, token, username, passw
 	}
 }
 
+func (h *AIHandler) hydrateSessionAuth(session *AISession) bool {
+	if session == nil {
+		return false
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	if authHasHost(session.Auth) {
+		return true
+	}
+	if auth := authFromTarget(session.Target); auth != nil {
+		session.Auth = auth
+		return true
+	}
+	if h.targetStore != nil && session.TargetID != "" {
+		if state, ok := h.targetStore.GetSession(session.TargetID); ok && state != nil && state.Target != nil {
+			if session.Target == nil {
+				session.Target = cloneTarget(state.Target)
+			}
+			if auth := authFromTarget(state.Target); auth != nil {
+				session.Auth = auth
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func authHasHost(auth *ai.AuthCreds) bool {
+	return auth != nil && strings.TrimSpace(auth.Host) != ""
+}
+
+func normalizeSessionStatus(session *AISession) string {
+	if session == nil {
+		return ""
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+
+	switch session.Status {
+	case "", "created":
+		switch {
+		case len(session.PendingActions) > 0:
+			session.Status = "awaiting_approval"
+		case session.Plan != nil:
+			session.Status = "planning"
+		default:
+			session.Status = "active"
+		}
+	}
+	return session.Status
+}
+
+func authFromTarget(target *engine.Target) *ai.AuthCreds {
+	if target == nil || strings.TrimSpace(target.Host) == "" {
+		return nil
+	}
+	return &ai.AuthCreds{
+		Host:       target.Host,
+		Token:      target.Token,
+		Username:   target.Username,
+		Password:   target.Password,
+		SkipTLS:    target.SkipTLS,
+		TimeoutSec: target.TimeoutSec,
+	}
+}
+
 func cloneTarget(target *engine.Target) *engine.Target {
 	if target == nil {
 		return nil
 	}
 	cloned := *target
 	return &cloned
+}
+
+func sanitizeTarget(target *engine.Target) *engine.Target {
+	if target == nil {
+		return nil
+	}
+	safe := cloneTarget(target)
+	safe.Token = ""
+	safe.Password = ""
+	safe.Kubeconfig = ""
+	return safe
+}
+
+func (h *AIHandler) sessionSummaryResponse(session *AISession) aiSessionSummaryResponse {
+	session.mu.RLock()
+	defer session.mu.RUnlock()
+	return aiSessionSummaryResponse{
+		ID:             session.ID,
+		TargetID:       session.TargetID,
+		Target:         sanitizeTarget(session.Target),
+		Status:         session.Status,
+		PendingActions: append([]PendingToolAction(nil), session.PendingActions...),
+		CreatedAt:      session.CreatedAt,
+		CanResumeChat:  authHasHost(session.Auth),
+	}
+}
+
+func (h *AIHandler) sessionDetailResponse(session *AISession) aiSessionDetailResponse {
+	session.mu.RLock()
+	defer session.mu.RUnlock()
+	return aiSessionDetailResponse{
+		ID:             session.ID,
+		TargetID:       session.TargetID,
+		Target:         sanitizeTarget(session.Target),
+		UIContext:      cloneSessionUIContext(session.UIContext),
+		Plan:           session.Plan,
+		Status:         session.Status,
+		Messages:       append([]ai.Message(nil), session.Messages...),
+		History:        append([]AIHistoryEntry(nil), session.History...),
+		PendingActions: append([]PendingToolAction(nil), session.PendingActions...),
+		CreatedAt:      session.CreatedAt,
+		CanResumeChat:  authHasHost(session.Auth),
+	}
+}
+
+func sessionStopped(session *AISession) bool {
+	if session == nil {
+		return false
+	}
+	session.mu.RLock()
+	defer session.mu.RUnlock()
+	return session.Status == "stopped"
+}
+
+func buildInitialSessionGreeting(host, targetID string, uiContext *AISessionUIContext) string {
+	targetLabel := strings.TrimSpace(host)
+	if targetLabel == "" {
+		targetLabel = strings.TrimSpace(targetID)
+	}
+	if targetLabel == "" {
+		targetLabel = "current target"
+	}
+
+	message := "AI session created for target " + targetLabel + ". I can help plan and execute penetration testing steps. Type \"plan\" to generate an attack plan, or describe your goal (e.g. \"分析这个集群能否逃逸/提权/打Dashboard\")."
+	if uiContext == nil || uiContext.SelectedPod == nil || strings.TrimSpace(uiContext.SelectedPod.Name) == "" {
+		return message
+	}
+
+	namespace := strings.TrimSpace(uiContext.SelectedPod.Namespace)
+	if namespace == "" {
+		namespace = "default"
+	}
+	message += "\n\nCurrent UI pod context: " + namespace + "/" + strings.TrimSpace(uiContext.SelectedPod.Name)
+	if container := strings.TrimSpace(uiContext.SelectedPod.Container); container != "" {
+		message += " (container: " + container + ")"
+	}
+	return message
+}
+
+func normalizeSessionUIContext(uiContext *AISessionUIContext) *AISessionUIContext {
+	if uiContext == nil {
+		return nil
+	}
+	normalized := &AISessionUIContext{
+		SharedPodSource: strings.TrimSpace(uiContext.SharedPodSource),
+		SharedPodCount:  uiContext.SharedPodCount,
+	}
+	if normalized.SharedPodCount < 0 {
+		normalized.SharedPodCount = 0
+	}
+	if uiContext.SelectedPod != nil {
+		name := strings.TrimSpace(uiContext.SelectedPod.Name)
+		if name != "" {
+			namespace := strings.TrimSpace(uiContext.SelectedPod.Namespace)
+			if namespace == "" {
+				namespace = "default"
+			}
+			normalized.SelectedPod = &AISessionPodContext{
+				Namespace: namespace,
+				Name:      name,
+				Container: strings.TrimSpace(uiContext.SelectedPod.Container),
+			}
+		}
+	}
+	if normalized.SelectedPod == nil && normalized.SharedPodSource == "" && normalized.SharedPodCount == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func cloneSessionUIContext(uiContext *AISessionUIContext) *AISessionUIContext {
+	if uiContext == nil {
+		return nil
+	}
+	cloned := &AISessionUIContext{
+		SharedPodSource: uiContext.SharedPodSource,
+		SharedPodCount:  uiContext.SharedPodCount,
+	}
+	if uiContext.SelectedPod != nil {
+		pod := *uiContext.SelectedPod
+		cloned.SelectedPod = &pod
+	}
+	return cloned
+}
+
+func buildSessionUIContextMessage(uiContext *AISessionUIContext) string {
+	normalized := normalizeSessionUIContext(uiContext)
+	if normalized == nil {
+		return ""
+	}
+
+	parts := []string{"Current UI context from the web console:"}
+	if normalized.SelectedPod != nil {
+		selectedPod := normalized.SelectedPod.Namespace + "/" + normalized.SelectedPod.Name
+		if normalized.SelectedPod.Container != "" {
+			selectedPod += " (container: " + normalized.SelectedPod.Container + ")"
+		}
+		parts = append(parts, "- selected pod: "+selectedPod)
+	}
+	if normalized.SharedPodCount > 0 {
+		line := fmt.Sprintf("- shared pod cache: %d pod(s)", normalized.SharedPodCount)
+		if normalized.SharedPodSource != "" {
+			line += " from " + normalized.SharedPodSource
+		}
+		parts = append(parts, line)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func buildPendingApprovalMessage(actions []PendingToolAction) string {
@@ -817,6 +1157,14 @@ func buildPendingApprovalMessage(actions []PendingToolAction) string {
 }
 
 func (h *AIHandler) approvePendingAction(c *gin.Context, session *AISession, actionID string) {
+	if sessionStopped(session) {
+		c.JSON(http.StatusConflict, gin.H{"error": "session is stopped. Please create a new session to continue."})
+		return
+	}
+	if !h.hydrateSessionAuth(session) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "session auth credentials not available. Please create a new session."})
+		return
+	}
 	session.mu.Lock()
 	idx := -1
 	var action PendingToolAction

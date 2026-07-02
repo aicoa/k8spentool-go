@@ -1,13 +1,22 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button, Card, Input, Space, Select, Tag, Typography } from 'antd';
-import { api, targetParams, recordTargetStep } from '../services/api';
+import { api, targetParams, recordTargetStep, PodListSource, PodRecord, PodSelection } from '../services/api';
 import ResultView from '../components/ResultView';
 
 const { Text } = Typography;
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
+interface Props {
+  getAuth: () => import('../services/api').AuthConfig;
+  addLog: (msg: string) => void;
+  activeTarget: string | null;
+  sharedPods: PodRecord[];
+  sharedPodSource: PodListSource | null;
+  sharedPodSelection: PodSelection | null;
+  onUpdateSharedPods: (pods: PodRecord[], source: PodListSource, options?: { namespaceFilter?: string; autoSelectFirst?: boolean }) => void;
+  onSelectSharedPod: (selection: PodSelection | null) => void;
+}
 
-export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
+export default function ExecTab({ getAuth, addLog, activeTarget, sharedPods, sharedPodSource, sharedPodSelection, onUpdateSharedPods, onSelectSharedPod }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [ns, setNs] = useState(''); // empty = all namespaces for listing; exec falls back to 'default' server-side
@@ -21,9 +30,22 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
   // File upload paths stored in React state
   const [uploadLocalPath, setUploadLocalPath] = useState('');
   const [uploadRemotePath, setUploadRemotePath] = useState('');
-  // Pod list cache — persists across exec calls
-  const [podListCache, setPodListCache] = useState<any[] | null>(null);
   const [podListExpanded, setPodListExpanded] = useState(false);
+  const [podSearch, setPodSearch] = useState('');
+
+  useEffect(() => {
+    if (!sharedPodSelection) {
+      setNs('');
+      setPod('');
+      setContainer('');
+      return;
+    }
+    setNs(sharedPodSelection.namespace || 'default');
+    setPod(sharedPodSelection.name || '');
+    if (sharedPodSelection.container !== undefined) {
+      setContainer(sharedPodSelection.container || '');
+    }
+  }, [sharedPodSelection?.namespace, sharedPodSelection?.name, sharedPodSelection?.container, activeTarget]);
 
   const run = async (fn: () => Promise<any>, label: string, cachePods?: boolean) => {
     setLoading(true);
@@ -32,9 +54,16 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
     try {
       const r = await fn();
       if (cachePods && r.pods) {
-        setPodListCache(r.pods);
+        onUpdateSharedPods(r.pods, r.source === 'kubelet' ? 'kubelet' : 'api-server', {
+          namespaceFilter: ns || '',
+          autoSelectFirst: !sharedPodSelection,
+        });
         setPodListExpanded(false); // reset expand on new list
         addLog(`[+] ${label}: ${r.total || r.pods.length} pods`);
+        if (!sharedPodSelection && r.pods.length > 0) {
+          const first = r.pods[0];
+          onSelectSharedPod({ namespace: first.namespace || 'default', name: first.name });
+        }
         // Don't replace the output card with pod list data
       } else {
         // Humanize exit codes in output
@@ -106,12 +135,21 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
     { value: 'curl', label: 'curl' },
   ];
 
-  const selectPod = (podName: string, podNs: string) => {
+  const selectPod = (podName: string, podNs: string, podContainer?: string) => {
     setPod(podName);
     setNs(podNs);
+    if (podContainer !== undefined) setContainer(podContainer);
+    onSelectSharedPod({ namespace: podNs || 'default', name: podName, container: podContainer || undefined });
   };
 
   const t = targetParams(getAuth());
+  const sharedPodSourceLabel = sharedPodSource === 'kubelet' ? 'Kubelet' : sharedPodSource === 'kubectl' ? 'kubectl' : 'API Server';
+  const filteredPodList = sharedPods.filter((p: any) => {
+    const keyword = podSearch.trim().toLowerCase();
+    if (!keyword) return true;
+    return `${p.namespace}/${p.name}`.toLowerCase().includes(keyword);
+  });
+  const visiblePodList = podListExpanded ? filteredPodList : filteredPodList.slice(0, 50);
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -124,7 +162,10 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
           </Space>
           <Space style={{ width: '100%' }}>
             <Input placeholder="命令 (container可能无netstat/ifconfig)" value={cmd} onChange={(e) => setCmd(e.target.value)} style={{ flex: 1 }} />
-            <Button type="primary" onClick={() => run(() => api.exec.apiExec({ ...t, namespace: ns, pod_name: pod, container_name: container, command: cmd }), 'API exec')}>执行</Button>
+            <Button type="primary" onClick={() => {
+              if (pod.trim()) onSelectSharedPod({ namespace: ns || 'default', name: pod.trim(), container: container.trim() || undefined });
+              run(() => api.exec.apiExec({ ...t, namespace: ns, pod_name: pod, container_name: container, command: cmd }), 'API exec');
+            }}>执行</Button>
           </Space>
           {/* Quick commands */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
@@ -141,22 +182,37 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
             <Button onClick={checkTools} disabled={!pod} style={{ color: '#52c41a' }}>🔍 探测可用工具</Button>
           </Space>
           {/* Pod list quick-select — persists independently from exec output */}
-          {podListCache && podListCache.length > 0 && (
+          {sharedPods.length > 0 && (
             <div style={{ maxHeight: podListExpanded ? 400 : 180, overflow: 'auto', marginTop: 4 }}>
-              <Space>
-                <Text type="secondary" style={{ fontSize: 11 }}>已缓存 {podListCache.length} 个Pod (点击选择):</Text>
-                {podListCache.length > 50 && (
+              <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                共享缓存里有 {sharedPods.length} 个 Pod（来源: {sharedPodSourceLabel}），在初始访问 / kubectl 里选中的目标，这里也会同步跟上。
+              </Text>
+              <Space wrap style={{ marginTop: 4 }}>
+                <Input
+                  size="small"
+                  placeholder="过滤 Pod 名称 / namespace"
+                  value={podSearch}
+                  onChange={(e) => setPodSearch(e.target.value)}
+                  style={{ width: 220 }}
+                />
+                {filteredPodList.length > 50 && (
                   <Button size="small" type="link" style={{ fontSize: 10, padding: 0 }}
                     onClick={() => setPodListExpanded(!podListExpanded)}>
-                    {podListExpanded ? '收起' : `展开全部 (剩余 ${podListCache.length - 50} 个)`}
+                    {podListExpanded ? '只看前50个' : `展开全部 (剩余 ${filteredPodList.length - 50} 个)`}
+                  </Button>
+                )}
+                {sharedPodSelection && (
+                  <Button size="small" type="link" style={{ fontSize: 10, padding: 0 }}
+                    onClick={() => onSelectSharedPod(null)}>
+                    清空当前选择
                   </Button>
                 )}
               </Space>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
-                {(podListExpanded ? podListCache : podListCache.slice(0, 50)).map((p: any, i: number) => (
-                  <Tag key={i} color={pod === p.name && ns === p.namespace ? 'blue' : 'default'}
+                {visiblePodList.map((p: any, i: number) => (
+                  <Tag key={`${p.namespace}-${p.name}-${i}`} color={sharedPodSelection?.name === p.name && sharedPodSelection?.namespace === p.namespace ? 'blue' : 'default'}
                     style={{ cursor: 'pointer' }}
-                    onClick={() => selectPod(p.name, p.namespace)}>
+                    onClick={() => selectPod(p.name, p.namespace, p.containers?.split(',').map((entry: string) => entry.trim()).filter(Boolean)[0])}>
                     {p.namespace}/{p.name}
                   </Tag>
                 ))}
@@ -167,8 +223,11 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
       </Card>
       <Card title="Kubelet执行" size="small">
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Button onClick={() => run(() => api.exec.kubeletListPods(t), 'List pods via Kubelet')}>列出Pod (Kubelet)</Button>
-          <Button onClick={() => run(() => api.exec.kubeletExec({ ...t, namespace: ns, pod_name: pod, command: cmd }), 'Kubelet exec')}>执行 via Kubelet</Button>
+          <Button onClick={() => run(() => api.exec.kubeletListPods(t), 'List pods via Kubelet', true)}>列出Pod (Kubelet)</Button>
+          <Button onClick={() => {
+            if (pod.trim()) onSelectSharedPod({ namespace: ns || 'default', name: pod.trim(), container: container.trim() || undefined });
+            run(() => api.exec.kubeletExec({ ...t, namespace: ns, pod_name: pod, command: cmd }), 'Kubelet exec');
+          }}>执行 via Kubelet</Button>
           <Button onClick={() => run(() => api.exec.enumSATokens(t), 'Enum SA tokens')}>枚举SA Token (API)</Button>
         </Space>
       </Card>
@@ -184,11 +243,15 @@ export default function ExecTab({ getAuth, addLog, activeTarget }: Props) {
             <Button type="primary" onClick={() => {
               if (!uploadLocalPath || !uploadRemotePath) { addLog('[-] 请填写本地和远程路径'); return; }
               if (!pod) { addLog('[-] 请先选择Pod'); return; }
+              onSelectSharedPod({ namespace: ns || 'default', name: pod.trim(), container: container.trim() || undefined });
               run(() => api.exec.uploadFile({ ...t, namespace: ns, pod_name: pod, local_path: uploadLocalPath, remote_path: uploadRemotePath }), `Upload to ${pod}`);
             }}>
               上传文件到 Pod
             </Button>
-            <Button onClick={() => run(() => api.exec.portForward({ ...t, namespace: ns, pod_name: pod, pod_port: 8080 }), 'Port forward info')}>
+            <Button onClick={() => {
+              if (pod.trim()) onSelectSharedPod({ namespace: ns || 'default', name: pod.trim(), container: container.trim() || undefined });
+              run(() => api.exec.portForward({ ...t, namespace: ns, pod_name: pod, pod_port: 8080 }), 'Port forward info');
+            }}>
               端口转发帮助
             </Button>
           </Space>

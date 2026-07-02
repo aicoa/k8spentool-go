@@ -182,6 +182,7 @@ func (h *PersistHandler) GenerateCronJob(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 
+	cronJob := kubectl.BuildCronJobBackdoor(req.Name, req.Namespace, req.Image, req.Schedule, req.Command)
 	yaml, yamlErr := kubectl.BuildCronJobBackdoorYAML(req.Name, req.Namespace, req.Image, req.Schedule, req.Command)
 	if yamlErr != nil {
 		c.JSON(http.StatusOK, gin.H{"error": yamlErr.Error()})
@@ -195,7 +196,7 @@ func (h *PersistHandler) GenerateCronJob(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
 	defer cancel()
-	result, applyErr := client.ApplyYAML(ctx, yaml)
+	result, applyErr := client.ApplyCronJob(ctx, req.Namespace, cronJob)
 	c.JSON(http.StatusOK, gin.H{"yaml": yaml, "applied": result, "error": errStr(applyErr)})
 }
 
@@ -237,6 +238,7 @@ func (h *PersistHandler) GenerateDaemonSet(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 
+	daemonSet := kubectl.BuildDaemonSetBackdoor(req.Name, req.Namespace, req.Image, req.MountPath, req.Command)
 	yaml, yamlErr := kubectl.BuildDaemonSetBackdoorYAML(req.Name, req.Namespace, req.Image, req.MountPath, req.Command)
 	if yamlErr != nil {
 		c.JSON(http.StatusOK, gin.H{"error": yamlErr.Error()})
@@ -252,7 +254,7 @@ func (h *PersistHandler) GenerateDaemonSet(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
 	defer cancel()
-	result, applyErr := client.ApplyYAML(ctx, yaml)
+	result, applyErr := client.ApplyDaemonSet(ctx, req.Namespace, daemonSet)
 	resp["applied"] = result
 	if applyErr != nil {
 		resp["error"] = applyErr.Error()

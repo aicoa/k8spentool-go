@@ -1206,20 +1206,26 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                target_id:
-                  type: string
-              required: [target_id]
+              $ref: '#/components/schemas/AISessionCreateRequest'
       responses:
         '201':
           description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AISessionDetailResponse'
     get:
       tags: [AI]
       summary: List AI sessions
       responses:
         '200':
           description: Session list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AISessionSummaryResponse'
 
   /ai/sessions/{id}:
     get:
@@ -1234,6 +1240,10 @@ paths:
       responses:
         '200':
           description: Session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AISessionDetailResponse'
     delete:
       tags: [AI]
       summary: Delete an AI session
@@ -1262,11 +1272,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                message:
-                  type: string
-              required: [message]
+              $ref: '#/components/schemas/AIChatRequest'
       responses:
         '200':
           description: AI response
@@ -1286,13 +1292,14 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                objective:
-                  type: string
+              $ref: '#/components/schemas/AIPlanRequest'
       responses:
         '200':
           description: Attack plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttackPlan'
     get:
       tags: [AI]
       summary: Get current attack plan
@@ -1305,6 +1312,10 @@ paths:
       responses:
         '200':
           description: Current plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttackPlan'
 
   /ai/sessions/{id}/approve:
     post:
@@ -1321,10 +1332,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                step_index:
-                  type: integer
+              $ref: '#/components/schemas/AIApproveRequest'
       responses:
         '200':
           description: Step approved
@@ -1342,6 +1350,13 @@ paths:
       responses:
         '200':
           description: Session stopped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
 
   /ai/config:
     get:
@@ -1503,6 +1518,48 @@ paths:
         '200':
           description: Escape risk assessment
 
+  /cdk/evaluate-pod:
+    post:
+      tags: [CDK]
+      summary: Run CDK-style in-pod environment evaluation checks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluatePodRequest'
+      responses:
+        '200':
+          description: In-pod evaluation results
+
+  /cdk/auto-escape:
+    post:
+      tags: [CDK]
+      summary: Automatically choose the best candidate pod and attempt escape
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutoEscapeRequest'
+      responses:
+        '200':
+          description: Auto-escape dry-run or execution result
+
+  /cdk/services-scan:
+    post:
+      tags: [CDK]
+      summary: Scan cluster services and endpoints with risk categorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubectlRequest'
+      responses:
+        '200':
+          description: Internal service scan results
+
 components:
   schemas:
     HealthResponse:
@@ -1526,7 +1583,7 @@ components:
           type: string
         auth_type:
           type: string
-          enum: [none, token, cert, kubeconfig]
+          enum: [none, token, cert, kubeconfig, userpass]
         skip_tls:
           type: boolean
         timeout_sec:
@@ -1563,6 +1620,171 @@ components:
         password:
           type: string
         kubeconfig:
+          type: string
+
+    AIMessage:
+      type: object
+      properties:
+        role:
+          type: string
+        content:
+          type: string
+        tool_call_id:
+          type: string
+
+    AIToolFunction:
+      type: object
+      properties:
+        name:
+          type: string
+        arguments:
+          type: string
+
+    AIToolCall:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        function:
+          $ref: '#/components/schemas/AIToolFunction'
+
+    PendingToolAction:
+      type: object
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        tool_call:
+          $ref: '#/components/schemas/AIToolCall'
+
+    AIHistoryEntry:
+      type: object
+      properties:
+        role:
+          type: string
+        content:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        tool_call_id:
+          type: string
+        pending_action_id:
+          type: string
+
+    AttackPlanStep:
+      type: object
+      properties:
+        phase:
+          type: string
+        tool:
+          type: string
+        action:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+
+    AttackPlan:
+      type: object
+      properties:
+        id:
+          type: string
+        target_id:
+          type: string
+        objective:
+          type: string
+        status:
+          type: string
+        current_step:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/AttackPlanStep'
+
+    AISessionCreateRequest:
+      type: object
+      required: [target_id]
+      properties:
+        target_id:
+          type: string
+        host:
+          type: string
+        token:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        skip_tls:
+          type: boolean
+        timeout_sec:
+          type: integer
+
+    AISessionSummaryResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        target_id:
+          type: string
+        target:
+          $ref: '#/components/schemas/Target'
+        status:
+          type: string
+        pending_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PendingToolAction'
+        created_at:
+          type: string
+          format: date-time
+        can_resume_chat:
+          type: boolean
+
+    AISessionDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/AISessionSummaryResponse'
+        - type: object
+          properties:
+            plan:
+              $ref: '#/components/schemas/AttackPlan'
+            messages:
+              type: array
+              items:
+                $ref: '#/components/schemas/AIMessage'
+            history:
+              type: array
+              items:
+                $ref: '#/components/schemas/AIHistoryEntry'
+
+    AIChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    AIPlanRequest:
+      type: object
+      properties:
+        objective:
+          type: string
+
+    AIApproveRequest:
+      type: object
+      properties:
+        step_index:
+          type: integer
+        action_id:
           type: string
 
     AccessRequest:
@@ -1917,6 +2139,50 @@ components:
           type: string
         node_name:
           type: string
+
+    EvaluatePodRequest:
+      type: object
+      required: [target_host, pod_name]
+      properties:
+        target_host:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        token:
+          type: string
+        skip_tls:
+          type: boolean
+        timeout_sec:
+          type: integer
+        namespace:
+          type: string
+        pod_name:
+          type: string
+
+    AutoEscapeRequest:
+      type: object
+      required: [target_host]
+      properties:
+        target_host:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        token:
+          type: string
+        skip_tls:
+          type: boolean
+        timeout_sec:
+          type: integer
+        lhost:
+          type: string
+        lport:
+          type: string
+        dry_run:
+          type: boolean
 
     TargetStepRequest:
       type: object

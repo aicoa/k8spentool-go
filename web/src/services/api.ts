@@ -41,6 +41,37 @@ export interface AuthConfig {
   auth_mode?: 'token' | 'userpass' | 'none';
 }
 
+export interface PodRecord {
+  namespace: string;
+  name: string;
+  status?: string;
+  node?: string;
+  ip?: string;
+  containers?: string;
+  images?: string;
+}
+
+export type PodListSource = 'api-server' | 'kubelet' | 'kubectl';
+
+export interface PodSelection {
+  namespace: string;
+  name: string;
+  container?: string;
+}
+
+export interface AISessionUIContext {
+  selected_pod?: PodSelection;
+  shared_pod_source?: PodListSource;
+  shared_pod_count?: number;
+}
+
+export interface SharedPodContext {
+  pods: PodRecord[];
+  source: PodListSource;
+  updated_at: string;
+  namespace_filter?: string;
+}
+
 export type TargetStepPhase = 'info' | 'access' | 'exec' | 'persist' | 'escape' | 'lateral' | 'kubectl';
 
 export interface TargetStepRecord {
@@ -153,7 +184,7 @@ export const api = {
     exec: (data: object) => post('/kubectl/exec', data),
   },
   ai: {
-    createSession: (targetId: string, auth?: AuthConfig) => post('/ai/sessions', { target_id: targetId, host: auth?.host, token: auth?.token, username: auth?.username, password: auth?.password, skip_tls: auth?.skip_tls, timeout_sec: auth?.timeout_sec }),
+    createSession: (targetId: string, auth?: AuthConfig, uiContext?: AISessionUIContext) => post('/ai/sessions', { target_id: targetId, host: auth?.host, token: auth?.token, username: auth?.username, password: auth?.password, skip_tls: auth?.skip_tls, timeout_sec: auth?.timeout_sec, ui_context: uiContext }),
     getSession: (id: string) => get(`/ai/sessions/${id}`),
     listSessions: () => get('/ai/sessions'),
     chat: (id: string, message: string) => post(`/ai/sessions/${id}/chat`, { message }),

@@ -70,7 +70,7 @@ func (h *ExecHandler) APIListPods(c *gin.Context) {
 			"containers": strings.Join(containers, ", "), "images": strings.Join(images, ", "),
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"pods": result, "total": len(result)})
+	c.JSON(http.StatusOK, gin.H{"pods": result, "total": len(result), "source": "api-server"})
 }
 
 func (h *ExecHandler) APIExecInPod(c *gin.Context) {
@@ -168,7 +168,31 @@ func (h *ExecHandler) KubeletListPods(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status_code": code, "body": util.FormatResponse(code, body)})
+	if code != http.StatusOK {
+		c.JSON(http.StatusOK, gin.H{
+			"error":       fmt.Sprintf("Kubelet list pods failed: HTTP %d", code),
+			"status_code": code,
+			"body":        util.FormatResponse(code, body),
+		})
+		return
+	}
+
+	items, parseErr := parseKubeletPodList(body)
+	if parseErr != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"error":       parseErr.Error(),
+			"status_code": code,
+			"body":        util.FormatResponse(code, body),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"pods":        flattenKubeletPods(items),
+		"total":       len(items),
+		"status_code": code,
+		"source":      "kubelet",
+	})
 }
 
 func (h *ExecHandler) KubeletExec(c *gin.Context) {
@@ -196,7 +220,7 @@ func (h *ExecHandler) KubeletExec(c *gin.Context) {
 	if req.ContainerName != "" {
 		url += "/" + req.ContainerName
 	}
-	code, body, err := util.SendPost(url, "cmd="+req.Command,
+	code, body, err := util.SendPost(url, encodeKubeletCommandForm(req.Command),
 		"application/x-www-form-urlencoded", "", req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})

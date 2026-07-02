@@ -1,17 +1,29 @@
 import React, { useState, useEffect } from 'react';
 import { Button, Card, Input, Space, List, Typography, Tag, Select, message, Collapse, Popconfirm } from 'antd';
 import { RobotOutlined, UserOutlined, ToolOutlined, SettingOutlined, ApiOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
-import { api } from '../services/api';
+import { api, AISessionUIContext, PodListSource, PodRecord, PodSelection } from '../services/api';
 
 const { Text } = Typography;
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; host: string; activeTarget: string | null; }
+interface Props {
+  getAuth: () => import('../services/api').AuthConfig;
+  addLog: (msg: string) => void;
+  host: string;
+  activeTarget: string | null;
+  sharedPods: PodRecord[];
+  sharedPodSource: PodListSource | null;
+  sharedPodSelection: PodSelection | null;
+}
 
 interface AISessionSummary {
   id: string;
   target_id?: string;
+  target?: {
+    host?: string;
+  };
   status?: string;
   created_at?: string;
+  can_resume_chat?: boolean;
   pending_actions?: any[];
   history?: Array<{ role: string; content: string }>;
 }
@@ -30,7 +42,25 @@ function historyToMessages(history?: Array<{ role: string; content: string }>) {
     .map((entry) => ({ role: entry.role, content: entry.content }));
 }
 
-export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
+function sessionTargetLabel(session: AISessionSummary) {
+  return session.target?.host || session.target_id || 'unknown';
+}
+
+function buildMessagesFromSessionPayload(payload: any, fallbackTargetLabel?: string) {
+  const restoredMessages = historyToMessages(payload?.history);
+  if (restoredMessages.length > 0) return restoredMessages;
+  const messageEntries = Array.isArray(payload?.messages)
+    ? payload.messages.filter((entry: any) => entry.role === 'assistant' || entry.role === 'user' || entry.role === 'system')
+    : [];
+  if (messageEntries.length > 0) return messageEntries;
+  const targetLabel = payload?.target?.host || payload?.target_id || fallbackTargetLabel || 'current target';
+  return [{
+    role: 'assistant',
+    content: `Session opened for target ${targetLabel}. This session does not have saved chat history yet, so you can continue from the current target context directly.`,
+  }];
+}
+
+export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods, sharedPodSource, sharedPodSelection }: Props) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Array<{ role: string; content: string; traces?: any[] }>>([]);
   const [pendingActions, setPendingActions] = useState<any[]>([]);
@@ -41,6 +71,8 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
   const [sessionLoading, setSessionLoading] = useState(false);
   const [sessionPage, setSessionPage] = useState(1);
   const [sessionPageSize, setSessionPageSize] = useState(10);
+  const [canResumeChat, setCanResumeChat] = useState(true);
+  const [chatDisabledReason, setChatDisabledReason] = useState('');
 
   // LLM config
   const [llmProvider, setLlmProvider] = useState('openai');
@@ -112,14 +144,23 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
   };
 
   const auth = getAuth();
+  const sharedPodSourceLabel = sharedPodSource === 'kubelet' ? 'Kubelet' : sharedPodSource === 'kubectl' ? 'kubectl' : 'API Server';
+  const currentUIContext: AISessionUIContext | undefined = sharedPodSelection || sharedPods.length > 0 ? {
+    selected_pod: sharedPodSelection || undefined,
+    shared_pod_source: sharedPodSource || undefined,
+    shared_pod_count: sharedPods.length || undefined,
+  } : undefined;
 
   const createSession = async () => {
     try {
       const targetId = activeTarget || host || 'default';
-      const r = await api.ai.createSession(targetId, auth);
+      const r = await api.ai.createSession(targetId, auth, currentUIContext);
       setSessionId(r.id);
-      setPendingActions([]);
-      setMessages([{ role: 'assistant', content: `AI session created for target ${auth.host || targetId}. I can help plan and execute penetration testing steps. Type "plan" to generate an attack plan, or describe your goal (e.g. "分析这个集群能否逃逸/提权/打Dashboard").` }]);
+      setCanResumeChat(true);
+      setChatDisabledReason('');
+      setPendingActions(r.pending_actions || []);
+      setPlan(r.plan || null);
+      setMessages(buildMessagesFromSessionPayload(r, auth.host || targetId));
       addLog('[AI] Session created: ' + r.id);
       loadSessions();
     } catch (e) { addLog('[AI] Failed to create session: ' + e); }
@@ -134,9 +175,23 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
       const unresolved = (r.pending_actions || []).filter(
         (a: any) => a.status !== 'completed' && a.status !== 'cancelled'
       );
+      const restoredMessages = historyToMessages(r.history);
+      const stopped = r.status === 'stopped';
+      const resumable = r.can_resume_chat !== false && !stopped;
+      setCanResumeChat(resumable);
+      setChatDisabledReason(
+        stopped
+          ? '当前会话已停止，不能继续自动执行。请新建会话。'
+          : (r.can_resume_chat === false ? '当前历史会话缺少认证信息，无法继续自动执行。请新建会话。' : '')
+      );
       setPendingActions(unresolved);
       setPlan(r.plan || null);
-      setMessages(historyToMessages(r.history));
+      setMessages(restoredMessages.length > 0 ? restoredMessages : buildMessagesFromSessionPayload(r, host));
+      if (stopped) {
+        message.warning('该历史会话已停止，只能查看历史记录。');
+      } else if (r.can_resume_chat === false) {
+        message.warning('该历史会话缺少可恢复的认证信息，只能查看历史记录。');
+      }
       addLog('[AI] Session loaded: ' + id);
     } catch (e) {
       message.error('加载 AI session 失败: ' + e);
@@ -147,10 +202,31 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
 
   const closeSession = () => {
     setSessionId(null);
+    setCanResumeChat(true);
+    setChatDisabledReason('');
     setMessages([]);
     setPendingActions([]);
     setPlan(null);
     addLog('[AI] Session closed');
+  };
+
+  const stopSession = async () => {
+    if (!sessionId) return;
+    setLoading(true);
+    try {
+      const r = await api.ai.stop(sessionId);
+      if (r?.error) throw new Error(r.error);
+      setCanResumeChat(false);
+      setChatDisabledReason('当前会话已停止，不能继续自动执行。请新建会话。');
+      setPendingActions([]);
+      setMessages((prev) => [...prev, { role: 'assistant', content: 'Session marked as stopped. You can reopen history or start a new session.' }]);
+      addLog('[AI] Session stopped: ' + sessionId);
+      loadSessions();
+    } catch (e) {
+      message.error('停止 AI session 失败: ' + e);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const deleteSession = async (id: string) => {
@@ -159,6 +235,8 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
       setSessions((prev) => prev.filter((session) => session.id !== id));
       if (sessionId === id) {
         setSessionId(null);
+        setCanResumeChat(true);
+        setChatDisabledReason('');
         setMessages([]);
         setPendingActions([]);
         setPlan(null);
@@ -276,7 +354,7 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
         }]}
       />
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, flex: 1, minHeight: 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, flexShrink: 0, alignItems: 'start' }}>
         <Card title={<span><RobotOutlined /> AI Chat</span>} size="small" style={{ display: 'flex', flexDirection: 'column' }}
         extra={
           <Space size={4}>
@@ -284,12 +362,23 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
               <Button size="small" type="primary" onClick={createSession}>新建会话</Button>
             ) : (
               <>
+                <Button size="small" danger onClick={stopSession} loading={loading}>停止</Button>
                 <Button size="small" onClick={closeSession}>关闭</Button>
                 <Button size="small" type="primary" onClick={createSession}>新建会话</Button>
               </>
             )}
           </Space>
         }>
+        {(sharedPodSelection || sharedPods.length > 0) && (
+          <div style={{ marginBottom: 8, padding: 8, background: '#fafafa', borderRadius: 6 }}>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              当前会话会复用 Web 面板上下文：
+              {sharedPodSelection ? ` Pod ${sharedPodSelection.namespace}/${sharedPodSelection.name}` : ' 尚未指定当前 Pod'}
+              {sharedPodSelection?.container ? ` (container: ${sharedPodSelection.container})` : ''}
+              {sharedPods.length > 0 ? `；共享缓存 ${sharedPods.length} 个 Pod（来源: ${sharedPodSourceLabel}）` : ''}
+            </Text>
+          </div>
+        )}
         <div style={{ flex: 1, overflow: 'auto', maxHeight: 400, marginBottom: 12 }}>
           {messages.map((m, i) => (
             <div key={i} style={{ marginBottom: 8, padding: 8, background: m.role === 'user' ? '#e6f7ff' : m.role === 'system' ? '#f6ffed' : '#f0f0f0', borderRadius: 8 }}>
@@ -315,9 +404,14 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
         </div>
         <Space style={{ width: '100%' }}>
           <Input placeholder="Message or 'plan'..." value={input} onChange={(e) => setInput(e.target.value)}
-            onPressEnter={sendMessage} disabled={!sessionId || loading || pendingActions.length > 0} style={{ flex: 1 }} />
-          <Button type="primary" onClick={sendMessage} loading={loading} disabled={!sessionId || pendingActions.length > 0}>Send</Button>
+            onPressEnter={sendMessage} disabled={!sessionId || !canResumeChat || loading || pendingActions.length > 0} style={{ flex: 1 }} />
+          <Button type="primary" onClick={sendMessage} loading={loading} disabled={!sessionId || !canResumeChat || pendingActions.length > 0}>Send</Button>
         </Space>
+        {!canResumeChat && chatDisabledReason && (
+          <Typography.Text type="warning" style={{ fontSize: 11, marginTop: 6 }}>
+            {chatDisabledReason}
+          </Typography.Text>
+        )}
       </Card>
       <Card title={pendingActions.length > 0 ? 'Pending Actions' : 'Attack Plan'} size="small">
         {pendingActions.length > 0 ? (
@@ -404,8 +498,24 @@ export default function AITab({ getAuth, addLog, host, activeTarget }: Props) {
                 <Typography.Text strong copyable={{ text: session.id }}>{session.id.slice(0, 8)}</Typography.Text>
                 <br />
                 <Typography.Text style={{ fontSize: 11, color: '#666' }}>
-                  target: {session.target_id || 'unknown'} | {formatSessionLabel(session)}
+                  target: {sessionTargetLabel(session)} | {formatSessionLabel(session)}
                 </Typography.Text>
+                {session.can_resume_chat === false && (
+                  <>
+                    <br />
+                    <Typography.Text style={{ fontSize: 11, color: '#cf1322' }}>
+                      缺少认证信息，仅可查看历史
+                    </Typography.Text>
+                  </>
+                )}
+                {session.status === 'stopped' && (
+                  <>
+                    <br />
+                    <Typography.Text style={{ fontSize: 11, color: '#8c8c8c' }}>
+                      会话已停止，需要新建会话继续
+                    </Typography.Text>
+                  </>
+                )}
                 {!!session.pending_actions?.length && (
                   <>
                     <br />

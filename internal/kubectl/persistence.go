@@ -73,6 +73,46 @@ func (c *Client) ApplyYAML(ctx context.Context, yamlContent string) (string, err
 	return strings.Join(results, "\n"), nil
 }
 
+func (c *Client) ApplyCronJob(ctx context.Context, namespace string, cronJob *batchv1.CronJob) (string, error) {
+	created, err := c.Clientset.BatchV1().CronJobs(namespace).Create(ctx, cronJob, metav1.CreateOptions{})
+	if err == nil {
+		return fmt.Sprintf("created CronJob/%s in %s", created.Name, namespace), nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
+		return "", fmt.Errorf("create CronJob/%s: %w", cronJob.Name, err)
+	}
+
+	existing, getErr := c.Clientset.BatchV1().CronJobs(namespace).Get(ctx, cronJob.Name, metav1.GetOptions{})
+	if getErr != nil {
+		return "", fmt.Errorf("get existing CronJob/%s: %w", cronJob.Name, getErr)
+	}
+	cronJob.SetResourceVersion(existing.GetResourceVersion())
+	if _, updateErr := c.Clientset.BatchV1().CronJobs(namespace).Update(ctx, cronJob, metav1.UpdateOptions{}); updateErr != nil {
+		return "", fmt.Errorf("update CronJob/%s: %w", cronJob.Name, updateErr)
+	}
+	return fmt.Sprintf("updated CronJob/%s in %s", cronJob.Name, namespace), nil
+}
+
+func (c *Client) ApplyDaemonSet(ctx context.Context, namespace string, daemonSet *appsv1.DaemonSet) (string, error) {
+	created, err := c.Clientset.AppsV1().DaemonSets(namespace).Create(ctx, daemonSet, metav1.CreateOptions{})
+	if err == nil {
+		return fmt.Sprintf("created DaemonSet/%s in %s", created.Name, namespace), nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
+		return "", fmt.Errorf("create DaemonSet/%s: %w", daemonSet.Name, err)
+	}
+
+	existing, getErr := c.Clientset.AppsV1().DaemonSets(namespace).Get(ctx, daemonSet.Name, metav1.GetOptions{})
+	if getErr != nil {
+		return "", fmt.Errorf("get existing DaemonSet/%s: %w", daemonSet.Name, getErr)
+	}
+	daemonSet.SetResourceVersion(existing.GetResourceVersion())
+	if _, updateErr := c.Clientset.AppsV1().DaemonSets(namespace).Update(ctx, daemonSet, metav1.UpdateOptions{}); updateErr != nil {
+		return "", fmt.Errorf("update DaemonSet/%s: %w", daemonSet.Name, updateErr)
+	}
+	return fmt.Sprintf("updated DaemonSet/%s in %s", daemonSet.Name, namespace), nil
+}
+
 func decodeYAMLDocuments(yamlContent string) ([]*unstructured.Unstructured, error) {
 	decoder := utilyaml.NewYAMLOrJSONDecoder(strings.NewReader(yamlContent), 4096)
 	objects := make([]*unstructured.Unstructured, 0)
@@ -249,9 +289,13 @@ func BuildCronJobBackdoorYAML(name, namespace, image, schedule, command string) 
 	return marshalK8sYAML(BuildCronJobBackdoor(name, namespace, image, schedule, command))
 }
 
+func BuildDaemonSetBackdoor(name, namespace, image, mountPath, command string) *appsv1.DaemonSet {
+	return buildDaemonSetBackdoorObject(name, namespace, image, mountPath, command)
+}
+
 // BuildDaemonSetBackdoorYAML creates a DaemonSet backdoor YAML.
 func BuildDaemonSetBackdoorYAML(name, namespace, image, mountPath, command string) (string, error) {
-	return marshalK8sYAML(buildDaemonSetBackdoorObject(name, namespace, image, mountPath, command))
+	return marshalK8sYAML(BuildDaemonSetBackdoor(name, namespace, image, mountPath, command))
 }
 
 func buildDaemonSetBackdoorObject(name, namespace, image, mountPath, command string) *appsv1.DaemonSet {

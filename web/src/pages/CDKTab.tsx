@@ -1,14 +1,23 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, Input, Space, Select, Typography, Divider, Popconfirm } from 'antd';
 import { RocketOutlined, SearchOutlined, KeyOutlined, ApiOutlined, BugOutlined, ContainerOutlined } from '@ant-design/icons';
-import { api, targetParams, recordTargetStep } from '../services/api';
+import { api, targetParams, recordTargetStep, PodListSource, PodRecord, PodSelection } from '../services/api';
 import ResultView from '../components/ResultView';
 
 const { Text, Paragraph } = Typography;
 
-interface Props { getAuth: () => import('../services/api').AuthConfig; addLog: (msg: string) => void; activeTarget: string | null; }
+interface Props {
+  getAuth: () => import('../services/api').AuthConfig;
+  addLog: (msg: string) => void;
+  activeTarget: string | null;
+  sharedPods: PodRecord[];
+  sharedPodSource: PodListSource | null;
+  sharedPodSelection: PodSelection | null;
+  onUpdateSharedPods: (pods: PodRecord[], source: PodListSource, options?: { namespaceFilter?: string; autoSelectFirst?: boolean }) => void;
+  onSelectSharedPod: (selection: PodSelection | null) => void;
+}
 
-export default function CDKTab({ getAuth, addLog, activeTarget }: Props) {
+export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, sharedPodSource, sharedPodSelection, onUpdateSharedPods, onSelectSharedPod }: Props) {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [escapeMode, setEscapeMode] = useState('privileged');
@@ -19,6 +28,16 @@ export default function CDKTab({ getAuth, addLog, activeTarget }: Props) {
   const [lport, setLport] = useState(4444);
   const [mitmIP, setMitmIP] = useState('');
   const [mitmPort, setMitmPort] = useState(443);
+  const [evalNs, setEvalNs] = useState('');
+  const [evalPod, setEvalPod] = useState('');
+  const [evalPods, setEvalPods] = useState<any[]>([]);
+  const [evalPodsLoading, setEvalPodsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!sharedPodSelection) return;
+    setEvalNs(sharedPodSelection.namespace || 'default');
+    setEvalPod(sharedPodSelection.name || '');
+  }, [sharedPodSelection?.namespace, sharedPodSelection?.name, activeTarget]);
 
   const run = async (fn: () => Promise<any>, label: string, phase: 'info' | 'access' | 'escape' | 'persist' | 'lateral' = 'escape') => {
     setLoading(true); setResult(null);
@@ -30,6 +49,43 @@ export default function CDKTab({ getAuth, addLog, activeTarget }: Props) {
   };
   const t = targetParams(getAuth());
   const em = [{ value: 'privileged', label: '🔴 特权容器逃逸 (cgroup/mount)', desc: '部署特权Pod，挂载宿主机根目录，利用cgroup release_agent或直接挂载磁盘逃逸' }, { value: 'docker-sock', label: '🟠 Docker Socket 逃逸', desc: '挂载docker.sock，通过Docker API创建特权容器逃逸' }, { value: 'host-proc', label: '🟡 core_pattern 逃逸', desc: '挂载宿主机/proc，覆写core_pattern实现命令执行' }, { value: 'cap-dac', label: '🟢 CAP_DAC_READ_SEARCH', desc: '利用capability绕过文件权限，读取宿主机敏感文件' }, { value: 'kubelet-log', label: '🔵 Kubelet /var/log 逃逸', desc: '利用/var/log挂载创建符号链接，通过kubelet读取任意文件' }];
+
+  const loadEvalPods = async () => {
+    setEvalPodsLoading(true);
+    try {
+      const r = await api.exec.apiListPods({ ...t, namespace: evalNs });
+      const pods = Array.isArray(r?.pods) ? r.pods : [];
+      setEvalPods(pods);
+      onUpdateSharedPods(pods, r?.source === 'kubelet' ? 'kubelet' : 'api-server', {
+        namespaceFilter: evalNs || '',
+        autoSelectFirst: !sharedPodSelection,
+      });
+      const currentNamespace = sharedPodSelection?.namespace || evalNs || 'default';
+      const currentName = sharedPodSelection?.name || evalPod;
+      const currentExists = pods.some((p: any) => p.name === currentName && (p.namespace || 'default') === currentNamespace);
+      if (pods.length === 0) {
+        setEvalPod('');
+      } else if (!currentExists) {
+        setEvalPod(pods[0].name);
+        setEvalNs(pods[0].namespace || evalNs);
+        onSelectSharedPod({ namespace: pods[0].namespace || 'default', name: pods[0].name });
+      }
+      addLog(`[CDK] loaded ${pods.length} pods for evaluate`);
+    } catch (e) {
+      setEvalPods([]);
+      addLog(`[CDK] load evaluate pods failed: ${e}`);
+    } finally {
+      setEvalPodsLoading(false);
+    }
+  };
+
+  const sharedPodSourceLabel = sharedPodSource === 'kubelet' ? 'Kubelet' : sharedPodSource === 'kubectl' ? 'kubectl' : 'API Server';
+  const availableEvalPods = useMemo(() => {
+    const sourcePods = evalPods.length > 0 ? evalPods : sharedPods;
+    const namespaceFilter = evalNs.trim();
+    return sourcePods.filter((item: any) => !namespaceFilter || (item.namespace || 'default') === namespaceFilter);
+  }, [evalPods, sharedPods, evalNs]);
+  const evalSelectValue = evalPod ? `${evalNs || sharedPodSelection?.namespace || 'default'}/${evalPod}` : undefined;
 
   return (<div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
     <Card title={<span><KeyOutlined /> 凭据获取</span>} size="small"><Space direction="vertical" style={{ width: '100%' }}>
@@ -52,6 +108,47 @@ export default function CDKTab({ getAuth, addLog, activeTarget }: Props) {
       <Divider style={{ margin: '4px 0' }} />
       <Button icon={<ContainerOutlined />} onClick={() => run(() => api.cdk.assessEscape(t), 'Assess escape surface', 'escape')}>评估逃逸面</Button>
       <Text type="secondary" style={{ fontSize: 10 }}>批量评估全局 Pod 的特权、主机命名空间、hostPath、docker.sock 等逃逸面</Text>
+      <Divider style={{ margin: '4px 0' }} />
+      {sharedPods.length > 0 && (
+        <Text type="secondary" style={{ fontSize: 10 }}>
+          当前共享缓存里有 {sharedPods.length} 个 Pod（来源: {sharedPodSourceLabel}）。你在命令执行 / kubectl 里选中的 Pod，这里会直接复用。
+        </Text>
+      )}
+      <Space wrap>
+        <Input placeholder="评估命名空间 (留空=全部)" value={evalNs} onChange={(e) => setEvalNs(e.target.value)} style={{ width: 160 }} />
+        <Button loading={evalPodsLoading} onClick={loadEvalPods}>列出 Pod</Button>
+      </Space>
+      {availableEvalPods.length > 0 && (
+        <Select
+          showSearch
+          allowClear
+          value={evalSelectValue}
+          onClear={() => {
+            setEvalPod('');
+            onSelectSharedPod(null);
+          }}
+          onChange={(value: string, option: any) => {
+            const parts = value.split('/'); const namespace = parts.length > 1 ? parts[0] : 'default'; const podName = parts.length > 1 ? parts[1] : parts[0];
+            setEvalPod(podName);
+            setEvalNs(option.namespace || namespace);
+            onSelectSharedPod({ namespace: option.namespace || namespace, name: podName, container: option?.container || undefined });
+          }}
+          style={{ width: '100%' }}
+          placeholder="选择一个 Pod 进行 CDK Evaluate"
+          optionFilterProp="label"
+          options={availableEvalPods.map((p: any) => ({
+            value: `${p.namespace}/${p.name}`,
+            label: `${p.namespace}/${p.name}`,
+            namespace: p.namespace,
+            container: p.containers?.split(',').map((entry: string) => entry.trim()).filter(Boolean)[0],
+          }))}
+        />
+      )}
+      <Button disabled={!evalPod} onClick={() => {
+        onSelectSharedPod({ namespace: evalNs || 'default', name: evalPod });
+        run(() => api.cdk.evaluatePod({ ...t, namespace: evalNs, pod_name: evalPod }), 'Evaluate pod', 'info');
+      }}>Evaluate Pod (CDK)</Button>
+      <Text type="secondary" style={{ fontSize: 10 }}>在选中的 Pod 内执行 CDK evaluate，自动检查 seccomp、docker.sock、hostPath、敏感文件与 SA Token。</Text>
     </Space></Card>
 
     <Card title={<span><RocketOutlined /> 持久化 & 横向移动</span>} size="small"><Space direction="vertical" style={{ width: '100%' }}>
@@ -71,7 +168,7 @@ export default function CDKTab({ getAuth, addLog, activeTarget }: Props) {
       <Space><Input placeholder="反弹LHOST" value={lhost} onChange={(e) => setLhost(e.target.value)} style={{ width: 120 }} /><Input placeholder="LPORT" value={lport} onChange={(e) => setLport(+e.target.value)} style={{ width: 70 }} /></Space>
       <Space>
         <Button danger onClick={() => run(() => api.cdk.autoEscape({ ...t, dry_run: true }), 'Auto-escape dry run', 'escape')}>Dry Run</Button>
-        <Popconfirm title="确认一键自动逃逸" description="将选择最优逃逸Pod并执行逃逸命令" okText="确认执行" cancelText="取消" onConfirm={() => run(() => api.cdk.autoEscape({ ...t, dry_run: false, lhost: lhost || 'attacker-ip', lport: String(lport || 4444) }), 'Auto-escape', 'escape')}><Button danger type="primary">一键自动逃逸</Button></Popconfirm>
+        <Popconfirm title="确认一键自动逃逸" description="将选择最优逃逸Pod并执行逃逸命令" okText="确认执行" cancelText="取消" onConfirm={() => run(() => api.cdk.autoEscape({ ...t, dry_run: false, lhost: lhost || undefined, lport: String(lport || 4444) }), 'Auto-escape', 'escape')}><Button danger type="primary">一键自动逃逸</Button></Popconfirm>
       </Space>
       <Text type="secondary" style={{ fontSize: 10 }}>Dry Run扫描全部Pod评估最佳逃逸路径。一键逃逸自动执行chroot/cgroup/docker.sock逃逸</Text>
     </Space></Card>

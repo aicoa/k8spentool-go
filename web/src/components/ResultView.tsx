@@ -41,7 +41,15 @@ const columnSchemas: Record<string, Col[]> = {
     { title: 'Name', dataIndex: 'name', key: 'name' },
     { title: 'Type', dataIndex: 'type', key: 'type', width: 100 },
     { title: 'ClusterIP', dataIndex: 'cluster_ip', key: 'cluster_ip', width: 130 },
+    { title: 'Category', dataIndex: 'category', key: 'category', width: 110, render: (v: string) => v || '-' },
+    { title: 'Risk', dataIndex: 'risk', key: 'risk', width: 90, render: (v: string) => v ? <Tag color={v === 'critical' ? 'red' : v === 'high' ? 'orange' : v === 'medium' ? 'gold' : 'default'}>{v}</Tag> : '-' },
     { title: 'Ports', dataIndex: 'ports', key: 'ports', render: (v: any[]) => (v || []).join(', ') },
+  ],
+  ingresses: [
+    { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 110 },
+    { title: 'Name', dataIndex: 'name', key: 'name' },
+    { title: 'Host', dataIndex: 'host', key: 'host' },
+    { title: 'Paths', dataIndex: 'paths', key: 'paths', render: (v: any[]) => (v || []).join(', ') || '-' },
   ],
   secrets: [
     { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 110 },
@@ -90,7 +98,7 @@ const columnSchemas: Record<string, Col[]> = {
   endpoints: [
     { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 110 },
     { title: 'Name', dataIndex: 'name', key: 'name' },
-    { title: 'Addresses', dataIndex: 'addresses', key: 'addresses', render: (v: any[]) => (v || []).join(', ') || '-' },
+    { title: 'Addresses', dataIndex: 'addresses', key: 'addresses', render: (_: any, row: any) => ((row.addresses || row.ips || []) as any[]).join(', ') || '-' },
   ],
   network_policies: [
     { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 110 },
@@ -106,11 +114,50 @@ const columnSchemas: Record<string, Col[]> = {
     { title: '#', dataIndex: 'idx', key: 'idx', width: 50, render: (_: any, __: any, i: number) => i + 1 },
     { title: 'Command', dataIndex: 'cmd', key: 'cmd', render: (v: string) => <code style={{ fontSize: 11 }}>{v}</code> },
   ],
+  results: [
+    { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 110 },
+    { title: 'Pod', dataIndex: 'pod', key: 'pod' },
+    { title: 'Container', dataIndex: 'container', key: 'container', width: 140, render: (v: string) => v || '-' },
+    { title: 'Status', dataIndex: 'status', key: 'status', width: 110, render: (v: string) => v === 'injected' ? <Tag color="green">injected</Tag> : <Tag color="red">{v || 'failed'}</Tag> },
+    { title: 'Output', dataIndex: 'output', key: 'output', render: (v: string) => v ? <code style={{ fontSize: 10 }}>{v}</code> : '-' },
+    { title: 'Error', dataIndex: 'error', key: 'error', render: (v: string) => v || '-' },
+  ],
+  steps: [
+    { title: 'Step', dataIndex: 'step', key: 'step', width: 70 },
+    { title: 'Action', dataIndex: 'action', key: 'action', width: 160 },
+    { title: 'Method', dataIndex: 'method', key: 'method', width: 140, render: (v: string) => v || '-' },
+    { title: 'Result', dataIndex: 'result', key: 'result', render: (_: any, row: any) => row.result || row.output || row.pod || '-' },
+    { title: 'Escaped', dataIndex: 'escaped', key: 'escaped', width: 90, render: (v: boolean) => typeof v === 'boolean' ? (v ? <Tag color="red">yes</Tag> : <Tag>no</Tag>) : '-' },
+  ],
+  attack_steps: [
+    { title: 'Step', dataIndex: 'step', key: 'step', width: 70 },
+    { title: 'Title', dataIndex: 'title', key: 'title', width: 180 },
+    { title: 'Description', dataIndex: 'desc', key: 'desc', render: (v: string) => v || '-' },
+  ],
+  exploit_hints: [
+    { title: 'Step', dataIndex: 'step', key: 'step', width: 70 },
+    { title: 'Title', dataIndex: 'title', key: 'title', width: 180 },
+    { title: 'Description', dataIndex: 'desc', key: 'desc', render: (v: string) => v || '-' },
+    { title: 'Command', dataIndex: 'command', key: 'command', render: (v: string) => v ? <code style={{ fontSize: 10 }}>{v}</code> : '-' },
+    { title: 'Method', dataIndex: 'method', key: 'method', render: (v: string) => v || '-' },
+  ],
+  probe_results: [
+    { title: 'URL', dataIndex: 'url', key: 'url' },
+    { title: 'HTTP', dataIndex: 'status_code', key: 'status_code', width: 80 },
+    { title: 'Type', dataIndex: 'content_type', key: 'content_type', width: 160, render: (v: string) => v || '-' },
+    { title: 'Dashboard', dataIndex: 'is_dashboard', key: 'is_dashboard', width: 95, render: (v: boolean) => v ? <Tag color="green">yes</Tag> : '-' },
+    { title: 'Accessible', dataIndex: 'accessible', key: 'accessible', width: 95, render: (v: boolean) => v ? <Tag color="green">yes</Tag> : '-' },
+    { title: 'Version', dataIndex: 'version', key: 'version', width: 110, render: (v: string) => v || '-' },
+    { title: 'Skip Login', dataIndex: 'skip_login_available', key: 'skip_login_available', width: 110, render: (v: boolean) => v ? <Tag color="orange">possible</Tag> : '-' },
+    { title: 'Auth Bypass', dataIndex: 'auth_bypass_possible', key: 'auth_bypass_possible', width: 120, render: (v: boolean | string) => v ? <Tag color="red">possible</Tag> : '-' },
+    { title: 'Preview', dataIndex: 'body_preview', key: 'body_preview', render: (v: string) => v ? <code style={{ fontSize: 10 }}>{truncateNote(v, 160)}</code> : '-' },
+  ],
   // CDK & Escape module schemas
   checks: [
     { title: '检测项', dataIndex: 'check', key: 'check', width: 160 },
-    { title: '描述', dataIndex: 'desc', key: 'desc' },
-    { title: '命令', dataIndex: 'cmd', key: 'cmd', render: (v: string) => <code style={{ fontSize: 10 }}>{v}</code> },
+    { title: '结果', dataIndex: 'result', key: 'result', render: (v: string) => v || '-' },
+    { title: '描述', dataIndex: 'desc', key: 'desc', render: (v: string) => v || '-' },
+    { title: '命令', dataIndex: 'cmd', key: 'cmd', render: (v: string) => v ? <code style={{ fontSize: 10 }}>{v}</code> : '-' },
   ],
   configmaps: [
     { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 120 },
@@ -131,11 +178,27 @@ const columnSchemas: Record<string, Col[]> = {
     { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 100 },
     { title: 'Node', dataIndex: 'node', key: 'node', width: 120 },
   ],
+  containers: [
+    { title: 'ID', dataIndex: 'id', key: 'id', width: 130, render: (v: string) => v ? <code style={{ fontSize: 10 }}>{String(v).slice(0, 12)}</code> : '-' },
+    { title: 'Names', dataIndex: 'names', key: 'names', render: (v: any[]) => Array.isArray(v) ? v.join(', ') : (v || '-') },
+    { title: 'Image', dataIndex: 'image', key: 'image' },
+    { title: 'State', dataIndex: 'state', key: 'state', width: 100, render: (v: string) => v || '-' },
+    { title: 'Status', dataIndex: 'status', key: 'status', render: (v: string) => v || '-' },
+  ],
   high_risk: [
     { title: 'Pod', dataIndex: 'name', key: 'name', render: (v: string, r: any) => <Text>{r.namespace}/{v}</Text> },
     { title: 'Risk', dataIndex: 'risk_level', key: 'risk_level', width: 70, render: (v: string) => <Tag color={v==='critical'?'red':'orange'}>{v}</Tag> },
     { title: 'Node', dataIndex: 'node', key: 'node', width: 120 },
     { title: 'Reasons', dataIndex: 'risk_reasons', key: 'risk_reasons', render: (v: any[]) => <Space size={2} wrap>{(v||[]).map((r:string,i:number) => <Tag key={i} color="red" style={{fontSize:10}}>{r}</Tag>)}</Space> },
+  ],
+  tokens: [
+    { title: 'Namespace', dataIndex: 'namespace', key: 'namespace', width: 110 },
+    { title: 'SA', dataIndex: 'sa_name', key: 'sa_name', width: 160 },
+    { title: 'Secret', dataIndex: 'secret_name', key: 'secret_name', width: 180 },
+    { title: 'Status', dataIndex: 'token_status', key: 'token_status', width: 110, render: (v: string) => v ? <Tag color={v === 'cluster_api_access' ? 'green' : v === 'restricted_rbac' ? 'blue' : v === 'unauthorized' ? 'red' : 'orange'}>{v}</Tag> : '-' },
+    { title: 'Valid', dataIndex: 'token_valid', key: 'token_valid', width: 80, render: (v: boolean) => typeof v === 'boolean' ? (v ? <Tag color="green">yes</Tag> : <Tag>no</Tag>) : '-' },
+    { title: 'Token', dataIndex: 'token', key: 'token', render: (v: string) => v ? <code style={{ fontSize: 10 }}>{String(v).slice(0, 48)}...</code> : '-' },
+    { title: 'Hint', dataIndex: 'hint', key: 'hint', render: (v: string) => v || '-' },
   ],
   vulnerabilities: [
     { title: 'CVE', dataIndex: 'cve', key: 'cve', width: 130 },
@@ -149,6 +212,11 @@ const columnSchemas: Record<string, Col[]> = {
   ],
 };
 
+columnSchemas.medium_risk = columnSchemas.high_risk;
+columnSchemas.all_risks = columnSchemas.high_risk;
+columnSchemas.notable = columnSchemas.services;
+columnSchemas.exploit_commands = columnSchemas.commands;
+
 // 文本类输出字段（直接 pre 展示）
 const TEXT_FIELDS = ['output', 'yaml', 'shadow_yaml', 'body', 'kubeconfig', 'payload', 'listener', 'version'];
 
@@ -158,24 +226,34 @@ function TagByStatus({ v, ok }: { v: string; ok?: string }) {
   return <Text style={{ color: good ? '#52c41a' : '#faad14' }}>{v}</Text>;
 }
 
-/** 从响应里找出主数组字段名与数组本体 */
-function findTableField(r: any): { key: string; rows: any[] } | null {
-  if (!r || typeof r !== 'object') return null;
+function findTableFields(r: any): { key: string; rows: any[] }[] {
+  if (!r || typeof r !== 'object') return [];
+  const preferred: { key: string; rows: any[] }[] = [];
+  const empty: { key: string; rows: any[] }[] = [];
+  const seen = new Set<string>();
+  const addRows = (key: string, rows: any[]) => {
+    seen.add(key);
+    if (rows.length > 0) {
+      preferred.push({ key, rows });
+      return;
+    }
+    empty.push({ key, rows });
+  };
   for (const k of Object.keys(columnSchemas)) {
     const v = (r as any)[k];
-    if (Array.isArray(v) && v.length >= 0) {
-      // 优先取非空数组；若为空数组也支持（显示空表）
-      return { key: k, rows: v };
+    if (Array.isArray(v)) {
+      addRows(k, v);
     }
   }
   // 兜底：任意数组字段
   for (const k of Object.keys(r)) {
+    if (seen.has(k)) continue;
     const v = (r as any)[k];
-    if (Array.isArray(v) && v.length > 0 && typeof v[0] === 'object') {
-      return { key: k, rows: v };
+    if (Array.isArray(v) && (v.length === 0 || typeof v[0] === 'object')) {
+      addRows(k, v);
     }
   }
-  return null;
+  return preferred.concat(empty);
 }
 
 function copyToClipboard(text: string) {
@@ -219,40 +297,61 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
     return <Alert type="error" showIcon message="请求出错" description={String(result.error)} style={{ marginTop: 4 }} />;
   }
 
-  // is_admin 等 bool 标志位 — 优先显示（安全告警）
-  if (typeof result.is_admin === 'boolean') {
-    return <Alert type={result.is_admin ? 'error' : 'success'} showIcon message={result.is_admin ? '⚠️ 当前凭据拥有 *:* 全权限（疑似 cluster-admin）' : '当前凭据非全权限'} />;
-  }
+  // is_admin 标志位 — 显示为告警横幅，不吞掉同响应的权限表格
+  const adminWarning = typeof result.is_admin === 'boolean' ? (
+    <Alert type={result.is_admin ? 'error' : 'success'} showIcon style={{ marginBottom: 8 }}
+      message={result.is_admin ? '⚠️ 当前凭据拥有 *:* 全权限（疑似 cluster-admin）' : '当前凭据非全权限'} />
+  ) : null;
 
   // 表格类优先 — 先检查结构化数组，再检查文本字段
   // 这样当响应同时有 body(文本) 和 secrets(表格) 时，表格优先渲染
-  const table = findTableField(result);
-  if (table) {
-    const cols = columnSchemas[table.key] || inferColumns(table.rows);
-    const normalized = table.rows.map((row: any, i: number) => {
-      const obj = typeof row === 'object' && row !== null ? row : { cmd: String(row) };
-      return { ...obj, _key: obj.name || obj.resource || obj.cmd || i };
-    });
-    return (
-      <div>
+  const tables = findTableFields(result) || [];
+  if (adminWarning || tables.length > 0) {
+    const contextNotes = buildContextNotes(result);
+	    return (
+	      <div>
+        {adminWarning}
         {typeof result.total === 'number' && (
           <Text type="secondary" style={{ fontSize: 11 }}>共 {result.total} 条</Text>
         )}
-        <Table
-          dataSource={normalized}
-          columns={cols}
-          size="small"
-          pagination={(normalized.length > 20 ? {
-            defaultPageSize: 10,
-            pageSizeOptions: ['10', '20', '30', '50', '100'],
-            showSizeChanger: true,
-            showTotal: (total: number) => `共 ${total} 条`,
-            size: 'small',
-          } : false)}
-          rowKey="_key"
-          scroll={{ x: 'max-content' }}
-          style={{ marginTop: 6 }}
-        />
+        {contextNotes.length > 0 && (
+          <div style={{ marginTop: 6 }}>
+            {contextNotes.map((note, index) => (
+              <div key={index} style={{ fontSize: 11, color: '#666', marginBottom: 4 }}>{note}</div>
+            ))}
+          </div>
+        )}
+	        {tables.map((table, index) => {
+	          const cols = columnSchemas[table.key] || inferColumns(table.rows);
+	          const normalized = table.rows.map((row: any, i: number) => {
+	            const obj = typeof row === 'object' && row !== null ? row : { value: String(row) };
+	            return { ...obj, _key: buildRowKey(table.key, obj, i) };
+	          });
+          return (
+            <div key={`${table.key}-${index}`} style={{ marginTop: 6 }}>
+              {tables.length > 1 && (
+                <Text strong style={{ fontSize: 12 }}>
+                  {tableTitle(table.key)} ({normalized.length})
+                </Text>
+              )}
+              <Table
+                dataSource={normalized}
+                columns={cols}
+                size="small"
+                pagination={(normalized.length > 20 ? {
+                  defaultPageSize: 10,
+                  pageSizeOptions: ['10', '20', '30', '50', '100'],
+                  showSizeChanger: true,
+                  showTotal: (total: number) => `共 ${total} 条`,
+                  size: 'small',
+                } : false)}
+                rowKey="_key"
+                scroll={{ x: 'max-content' }}
+                style={{ marginTop: 6 }}
+              />
+            </div>
+          );
+        })}
       </div>
     );
   }
@@ -263,14 +362,22 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
     const parsed = tryParseKubectlJSON(textVal);
     if (parsed) {
       const cols = columnSchemas[parsed.key] || inferColumns(parsed.rows);
-      const normalized = parsed.rows.map((row: any, i: number) => {
-        const obj = typeof row === 'object' && row !== null ? row : { cmd: String(row) };
-        return { ...obj, _key: obj.name || obj.resource || obj.cmd || i };
-      });
+	      const normalized = parsed.rows.map((row: any, i: number) => {
+	        const obj = typeof row === 'object' && row !== null ? row : { cmd: String(row) };
+	        return { ...obj, _key: buildRowKey(parsed.key, obj, i) };
+	      });
+      const contextNotes = buildContextNotes(result);
       return (
         <div>
           <Text type="secondary" style={{ fontSize: 11 }}>{parsed.title}（共 {parsed.rows.length} 条）</Text>
           {result.command && <Text code style={{ fontSize: 10, marginLeft: 8 }}>{String(result.command)}</Text>}
+          {contextNotes.length > 0 && (
+            <div style={{ marginTop: 6 }}>
+              {contextNotes.map((note, index) => (
+                <div key={index} style={{ fontSize: 11, color: '#666', marginBottom: 4 }}>{note}</div>
+              ))}
+            </div>
+          )}
           <Table
             dataSource={normalized}
             columns={cols}
@@ -411,4 +518,152 @@ function inferColumns(rows: any[]): Col[] {
     return [{ title: 'Value', dataIndex: 'value', key: 'value' }];
   }
   return Object.keys(rows[0]).map((k) => ({ title: k, dataIndex: k, key: k }));
+}
+
+function buildContextNotes(result: any): string[] {
+  if (!result || typeof result !== 'object') return [];
+  const notes: string[] = [];
+  const looksLikeDashboardDiscovery =
+    typeof result.found === 'boolean'
+    || Array.isArray(result.services)
+    || Array.isArray(result.pods)
+    || Array.isArray(result.deployments)
+    || Array.isArray(result.ingresses);
+  for (const key of ['note', 'description', 'connection_hint', 'hint']) {
+    const value = result[key];
+    if (typeof value === 'string' && value.trim()) {
+      notes.push(value.trim());
+    }
+  }
+  if (typeof result.recommendation === 'string' && result.recommendation.trim()) {
+    notes.push(result.recommendation.trim());
+  }
+  if (typeof result.instruction === 'string' && result.instruction.trim()) {
+    notes.push(result.instruction.trim());
+  }
+  if (Array.isArray(result.warnings)) {
+    result.warnings
+      .filter((warning: any) => typeof warning === 'string' && warning.trim())
+      .slice(0, 6)
+      .forEach((warning: string) => notes.push(`warning: ${warning.trim()}`));
+  }
+  if (typeof result.source === 'string' && result.source.trim()) {
+    notes.push(`来源: ${result.source.trim()}`);
+  }
+  if (result.summary && typeof result.summary === 'object') {
+    const summary = result.summary;
+    if (typeof summary.risk_level === 'string' && summary.risk_level.trim()) {
+      notes.push(`风险等级: ${summary.risk_level.trim()}`);
+    }
+    if (Array.isArray(summary.risks)) {
+      summary.risks
+        .filter((risk: any) => typeof risk === 'string' && risk.trim())
+        .slice(0, 8)
+        .forEach((risk: string) => notes.push(risk.trim()));
+    }
+  }
+  if (typeof result.pod_used === 'string' && result.pod_used.trim()) {
+    notes.push(`执行目标 Pod: ${result.pod_used.trim()}`);
+  }
+  if (typeof result.escaped === 'boolean') {
+    notes.push(`逃逸结果: ${result.escaped ? '已确认宿主机执行证据' : '未确认宿主机执行证据'}`);
+  }
+  if (result.host_fs_mounted === true && result.escaped !== true) {
+    notes.push('已挂载宿主机文件系统，但尚未看到明确的宿主机 shell / chroot 成功证据。');
+  }
+  if (result.host_container_created === true && result.escaped !== true) {
+    notes.push('已通过 docker.sock 创建宿主机侧容器，但当前返回还没有直接宿主机 shell 证据。');
+  }
+  if (result.categories && typeof result.categories === 'object' && !Array.isArray(result.categories)) {
+    const entries = Object.entries(result.categories)
+      .filter(([, value]) => typeof value === 'number')
+      .sort(([a], [b]) => a.localeCompare(b));
+    if (entries.length > 0) {
+      notes.push(`服务分类统计: ${entries.map(([key, value]) => `${key}=${value}`).join(', ')}`);
+    }
+  }
+  if (typeof result.high_risk === 'number') {
+    notes.push(`高风险服务数量: ${result.high_risk}`);
+  }
+  if (typeof result.valid_count === 'number') {
+    notes.push(`有效 Dashboard Token: ${result.valid_count}${typeof result.total === 'number' ? ` / ${result.total}` : ''}`);
+  }
+  if (looksLikeDashboardDiscovery && (typeof result.total_svcs === 'number' || typeof result.total_pods === 'number')) {
+    notes.push(`发现 Dashboard 资源: Service=${result.total_svcs || 0}, Pod=${result.total_pods || 0}`);
+  }
+  if (typeof result.discovery_count === 'number') {
+    notes.push(`探测请求次数: ${result.discovery_count}`);
+  }
+  if (result.api_proxy_accessible === true) {
+    notes.push('Dashboard API proxy 形式看起来可达。');
+  }
+  if (typeof result.found === 'boolean' && !result.found) {
+    notes.push('未发现 Dashboard 相关 Service / Pod。');
+  }
+  if (typeof result.total_pods === 'number' && typeof result.risky_count === 'number') {
+    notes.push(`风险 Pod: ${result.risky_count} / ${result.total_pods}`);
+  }
+  if (typeof result.pods_discovered === 'number' && typeof result.containers_attempted === 'number') {
+    notes.push(`发现 Pod: ${result.pods_discovered}，尝试写入容器: ${result.containers_attempted}`);
+  }
+  if (typeof result.success_count === 'number' && typeof result.failed_count === 'number') {
+    notes.push(`成功: ${result.success_count}，失败: ${result.failed_count}`);
+  }
+  if (typeof result.evidence === 'string' && result.evidence.trim()) {
+    notes.push(`证据片段: ${truncateNote(result.evidence.trim(), 220)}`);
+  }
+  return notes;
+}
+
+function truncateNote(value: string, maxLen: number) {
+  return value.length > maxLen ? value.slice(0, maxLen) + '...' : value;
+}
+
+function buildRowKey(tableKey: string, obj: Record<string, any>, index: number) {
+  const parts = [tableKey];
+  for (const key of ['namespace', 'pod', 'name', 'container', 'resource', 'cmd', 'id', 'url', 'secret_name', 'sa_name', 'node', 'port']) {
+    const value = obj[key];
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      parts.push(String(value).trim());
+    }
+  }
+  return parts.length > 1 ? parts.join(':') : `${tableKey}-${index}`;
+}
+
+function tableTitle(key: string) {
+  const titles: Record<string, string> = {
+    pods: 'Pods',
+    nodes: 'Nodes',
+    services: 'Services',
+    ingresses: 'Ingresses',
+    deployments: 'Deployments',
+    endpoints: 'Endpoints',
+    secrets: 'Secrets',
+    configmaps: 'ConfigMaps',
+    psps: 'PSPs',
+    service_accounts: 'Service Accounts',
+    cluster_role_bindings: 'Cluster Role Bindings',
+    permissions: 'Permissions',
+    network_policies: 'Network Policies',
+    taints: 'Taints',
+    images: 'Images',
+    results: 'Results',
+    steps: 'Steps',
+    tokens: 'Tokens',
+    probe_results: 'Probe Results',
+    attack_steps: 'Attack Steps',
+    exploit_hints: 'Exploit Hints',
+    checks: 'Checks',
+    commands: 'Commands',
+    exploit_commands: 'Exploit Commands',
+    high_risk: 'High Risk Pods',
+    medium_risk: 'Medium Risk Pods',
+    all_risks: 'All Risk Pods',
+    apiserver_pods: 'API Server Pods',
+    containers: 'Containers',
+    notable: 'Notable Services',
+    vulnerabilities: 'Vulnerabilities',
+    ports: 'Ports',
+  };
+  return titles[key] || key;
 }
