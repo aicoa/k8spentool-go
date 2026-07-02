@@ -426,7 +426,7 @@ type toolLoopOutcome struct {
 
 // runToolLoop 执行 ReAct 循环，最多 maxRounds 轮。
 func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools []ai.ToolDefinition, llm aiChatClient) (*toolLoopOutcome, error) {
-	const maxRounds = 6
+	const maxRounds = 10
 
 	session.mu.RLock()
 	messages := h.buildLLMMessages(session)

