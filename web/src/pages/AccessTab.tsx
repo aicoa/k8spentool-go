@@ -24,6 +24,7 @@ export default function AccessTab({ getAuth, addLog, activeTarget, onOpenDashboa
   const [customMethod, setCustomMethod] = useState('GET');
   const [kubeletNs, setKubeletNs] = useState('default');
   const [kubeletPod, setKubeletPod] = useState('');
+  const [kubeletContainer, setKubeletContainer] = useState('');
   const [kubeletCmd, setKubeletCmd] = useState('id');
   const [etcdKey, setEtcdKey] = useState('/registry/secrets/default');
   const [sshPubKey, setSshPubKey] = useState('');
@@ -33,14 +34,17 @@ export default function AccessTab({ getAuth, addLog, activeTarget, onOpenDashboa
     if (!sharedPodSelection) return;
     setKubeletNs(sharedPodSelection.namespace || 'default');
     setKubeletPod(sharedPodSelection.name || '');
-  }, [sharedPodSelection?.namespace, sharedPodSelection?.name]);
+    if (sharedPodSelection.container !== undefined) {
+      setKubeletContainer(sharedPodSelection.container || '');
+    }
+  }, [sharedPodSelection?.container, sharedPodSelection?.namespace, sharedPodSelection?.name]);
 
   const run = async (fn: () => Promise<any>, label: string) => {
     setLoading(true); setResult(null);
     try {
       const r = await fn();
       setResult(r);
-      addLog(`[+] ${label} succeeded`);
+      addLog(r?.error ? `[-] ${label} failed: ${r.error}` : `[+] ${label} succeeded`);
       recordTargetStep(activeTarget, {
         phase: 'access',
         tool: 'access',
@@ -107,6 +111,7 @@ export default function AccessTab({ getAuth, addLog, activeTarget, onOpenDashboa
                   const parts = value.split('/'); const namespace = parts.length > 1 ? parts[0] : 'default'; const podName = parts.length > 1 ? parts[1] : parts[0];
                   setKubeletNs(namespace);
                   setKubeletPod(podName);
+                  setKubeletContainer(option?.container || '');
                   onSelectSharedPod({ namespace, name: podName, container: option?.container || undefined });
                 }}
                 options={sharedPods.map((item) => ({
@@ -130,12 +135,23 @@ export default function AccessTab({ getAuth, addLog, activeTarget, onOpenDashboa
           <Space>
             <Input placeholder="命名空间" value={kubeletNs} onChange={(e) => setKubeletNs(e.target.value)} style={{ width: 100 }} />
             <Input placeholder="Pod name" value={kubeletPod} onChange={(e) => setKubeletPod(e.target.value)} style={{ width: 150 }} />
+            <Input placeholder="容器(可选)" value={kubeletContainer} onChange={(e) => setKubeletContainer(e.target.value)} style={{ width: 140 }} />
             <Input placeholder="命令" value={kubeletCmd} onChange={(e) => setKubeletCmd(e.target.value)} style={{ width: 150 }} />
             <Button onClick={() => {
               if (kubeletPod.trim()) {
-                onSelectSharedPod({ namespace: kubeletNs || 'default', name: kubeletPod.trim() });
+                onSelectSharedPod({
+                  namespace: kubeletNs || 'default',
+                  name: kubeletPod.trim(),
+                  container: kubeletContainer.trim() || undefined,
+                });
               }
-              run(() => api.access.kubeletExec({ ...t, namespace: kubeletNs, pod_name: kubeletPod, command: kubeletCmd }), 'Kubelet exec');
+              run(() => api.access.kubeletExec({
+                ...t,
+                namespace: kubeletNs,
+                pod_name: kubeletPod,
+                container_name: kubeletContainer.trim() || undefined,
+                command: kubeletCmd,
+              }), 'Kubelet exec');
             }}>执行</Button>
           </Space>
           <Collapse ghost size="small" items={[{

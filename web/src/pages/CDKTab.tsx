@@ -41,7 +41,7 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
 
   const run = async (fn: () => Promise<any>, label: string, phase: 'info' | 'access' | 'escape' | 'persist' | 'lateral' = 'escape') => {
     setLoading(true); setResult(null);
-    try { const r = await fn(); setResult(r); addLog(`[CDK] ${label}`);
+    try { const r = await fn(); setResult(r); addLog(r?.error ? `[CDK] ${label} failed: ${r.error}` : `[CDK] ${label}`);
       recordTargetStep(activeTarget, { phase, tool: 'cdk', action: label, success: !r?.error, summary: r?.error ? `${label} failed: ${r.error}` : `${label} completed`, data: r, output: r?.output || r?.yaml, error: r?.error }).catch(() => {}); }
     catch (e) { setResult({ error: String(e) }); addLog(`[CDK] ${label} failed`);
       recordTargetStep(activeTarget, { phase, tool: 'cdk', action: label, success: false, summary: `${label} failed`, error: String(e) }).catch(() => {}); }
@@ -68,7 +68,11 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
       } else if (!currentExists) {
         setEvalPod(pods[0].name);
         setEvalNs(pods[0].namespace || evalNs);
-        onSelectSharedPod({ namespace: pods[0].namespace || 'default', name: pods[0].name });
+        onSelectSharedPod({
+          namespace: pods[0].namespace || 'default',
+          name: pods[0].name,
+          container: pods[0].containers?.split(',').map((entry: string) => entry.trim()).filter(Boolean)[0] || undefined,
+        });
       }
       addLog(`[CDK] loaded ${pods.length} pods for evaluate`);
     } catch (e) {
@@ -86,6 +90,14 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
     return sourcePods.filter((item: any) => !namespaceFilter || (item.namespace || 'default') === namespaceFilter);
   }, [evalPods, sharedPods, evalNs]);
   const evalSelectValue = evalPod ? `${evalNs || sharedPodSelection?.namespace || 'default'}/${evalPod}` : undefined;
+  const selectedEvalContainer = useMemo(() => {
+    const targetNamespace = evalNs || sharedPodSelection?.namespace || 'default';
+    if (sharedPodSelection?.name === evalPod && (sharedPodSelection.namespace || 'default') === targetNamespace) {
+      return sharedPodSelection.container || '';
+    }
+    const matchedPod = availableEvalPods.find((item: any) => item.name === evalPod && (item.namespace || 'default') === targetNamespace);
+    return matchedPod?.containers?.split(',').map((entry: string) => entry.trim()).filter(Boolean)[0] || '';
+  }, [availableEvalPods, evalNs, evalPod, sharedPodSelection?.container, sharedPodSelection?.name, sharedPodSelection?.namespace]);
 
   return (<div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
     <Card title={<span><KeyOutlined /> 凭据获取</span>} size="small"><Space direction="vertical" style={{ width: '100%' }}>
@@ -146,8 +158,14 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
       )}
       <Button disabled={!evalPod} onClick={() => {
         const targetNs = sharedPodSelection?.namespace || evalNs || 'default';
-        onSelectSharedPod({ namespace: targetNs, name: evalPod });
-        run(() => api.cdk.evaluatePod({ ...t, namespace: targetNs, pod_name: evalPod }), 'Evaluate pod', 'info');
+        const targetContainer = selectedEvalContainer || undefined;
+        onSelectSharedPod({ namespace: targetNs, name: evalPod, container: targetContainer });
+        run(() => api.cdk.evaluatePod({
+          ...t,
+          namespace: targetNs,
+          pod_name: evalPod,
+          container_name: targetContainer,
+        }), 'Evaluate pod', 'info');
       }}>Evaluate Pod (CDK)</Button>
       <Text type="secondary" style={{ fontSize: 10 }}>在选中的 Pod 内执行 CDK evaluate，自动检查 seccomp、docker.sock、hostPath、敏感文件与 SA Token。</Text>
     </Space></Card>

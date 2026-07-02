@@ -260,6 +260,42 @@ func TestStoppedSessionRejectsChat(t *testing.T) {
 	}
 }
 
+func TestChatWithoutRecoverableAuthDoesNotAppendUserMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("HOME", t.TempDir())
+
+	handler := NewAIHandler(nil)
+	handler.sessions["session-1"] = &AISession{
+		ID:        "session-1",
+		Status:    "active",
+		CreatedAt: time.Now(),
+		History: []AIHistoryEntry{{
+			Role:      "assistant",
+			Content:   "hello",
+			Timestamp: time.Now(),
+		}},
+	}
+
+	router := gin.New()
+	router.POST("/ai/sessions/:id/chat", handler.Chat)
+
+	req := httptest.NewRequest(http.MethodPost, "/ai/sessions/session-1/chat", strings.NewReader(`{"message":"plan"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected missing-auth session chat to be rejected with 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	session := handler.sessions["session-1"]
+	if len(session.History) != 1 {
+		t.Fatalf("expected chat rejection to avoid mutating history, got %d entries", len(session.History))
+	}
+	if len(session.Messages) != 0 {
+		t.Fatalf("expected chat rejection to avoid mutating messages, got %#v", session.Messages)
+	}
+}
+
 func TestCreateSessionPersistsInitialGreetingAndUIContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("HOME", t.TempDir())
@@ -312,6 +348,34 @@ func TestCreateSessionPersistsInitialGreetingAndUIContext(t *testing.T) {
 	}
 	if len(session.Messages) != 1 || session.Messages[0].Role != "assistant" {
 		t.Fatalf("expected initial assistant greeting in messages, got %#v", session.Messages)
+	}
+	if session.Target == nil || session.Target.CreatedAt.IsZero() {
+		t.Fatalf("expected session target snapshot to preserve created_at metadata, got %#v", session.Target)
+	}
+}
+
+func TestResolveTargetSnapshotPrefersTargetStoreMetadata(t *testing.T) {
+	createdAt := time.Now().Add(-10 * time.Minute)
+	target := &engine.Target{
+		ID:         "target-1",
+		Host:       "cluster.local",
+		Port:       6443,
+		Username:   "bob",
+		Password:   "pw",
+		SkipTLS:    true,
+		TimeoutSec: 10,
+		CreatedAt:  createdAt,
+	}
+	handler := NewAIHandler(stubAITargetStore{
+		session: engine.NewSessionState(target),
+	})
+
+	snapshot := handler.resolveTargetSnapshot("target-1", "", "", "", "", true, 0)
+	if snapshot == nil {
+		t.Fatal("expected target snapshot from target store")
+	}
+	if !snapshot.CreatedAt.Equal(createdAt) {
+		t.Fatalf("expected created_at to be preserved from target store, got %v want %v", snapshot.CreatedAt, createdAt)
 	}
 }
 

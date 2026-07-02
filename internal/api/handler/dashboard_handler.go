@@ -123,10 +123,14 @@ func (h *DashboardHandler) Discover(c *gin.Context) {
 	if deployList != nil {
 		for _, dep := range deployList.Items {
 			if strings.Contains(strings.ToLower(dep.Name), "dashboard") {
+				replicas := int32(0)
+				if dep.Spec.Replicas != nil {
+					replicas = *dep.Spec.Replicas
+				}
 				dashboardDeployments = append(dashboardDeployments, gin.H{
 					"name":         dep.Name,
 					"namespace":    dep.Namespace,
-					"replicas":     *dep.Spec.Replicas,
+					"replicas":     replicas,
 					"ready":        dep.Status.ReadyReplicas,
 					"dashboard_ns": dep.Namespace,
 				})

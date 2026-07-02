@@ -152,6 +152,7 @@ func (h *ExecHandler) EnumSATokens(c *gin.Context) {
 func (h *ExecHandler) KubeletListPods(c *gin.Context) {
 	var req struct {
 		TargetHost string `json:"target_host" binding:"required"`
+		Token      string `json:"token"`
 		TimeoutSec int    `json:"timeout_sec"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
@@ -163,7 +164,7 @@ func (h *ExecHandler) KubeletListPods(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 	url := "https://" + req.TargetHost + ":10250/pods"
-	code, body, err := util.SendRequest(url, "GET", "", req.TimeoutSec, req.SkipTLS)
+	code, body, err := util.SendRequest(url, "GET", req.Token, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -202,6 +203,7 @@ func (h *ExecHandler) KubeletExec(c *gin.Context) {
 		PodName       string `json:"pod_name" binding:"required"`
 		ContainerName string `json:"container_name"`
 		Command       string `json:"command" binding:"required"`
+		Token         string `json:"token"`
 		TimeoutSec    int    `json:"timeout_sec"`
 		SkipTLS       bool   `json:"skip_tls"`
 	}
@@ -221,7 +223,7 @@ func (h *ExecHandler) KubeletExec(c *gin.Context) {
 		url += "/" + req.ContainerName
 	}
 	code, body, err := util.SendPost(url, encodeKubeletCommandForm(req.Command),
-		"application/x-www-form-urlencoded", "", req.TimeoutSec, req.SkipTLS)
+		"application/x-www-form-urlencoded", req.Token, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return

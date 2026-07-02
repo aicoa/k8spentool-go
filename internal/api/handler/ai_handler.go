@@ -333,6 +333,11 @@ func (h *AIHandler) Chat(c *gin.Context) {
 		return
 	}
 
+	if !h.hydrateSessionAuth(session) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "session auth credentials not available. Please create a new session."})
+		return
+	}
+
 	session.mu.Lock()
 	if len(session.PendingActions) > 0 {
 		pending := append([]PendingToolAction(nil), session.PendingActions...)
@@ -359,11 +364,6 @@ func (h *AIHandler) Chat(c *gin.Context) {
 	// ReAct 工具调用循环：LLM 请求工具 → 后端执行 → 结果回灌 → 直到 LLM 给出文本结论
 	llm := h.GetOrCreateLLMClient()
 	tools := ai.GetOpenAIToolDefinitions()
-
-	if !h.hydrateSessionAuth(session) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "session auth credentials not available. Please create a new session."})
-		return
-	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
 	defer cancel()
@@ -910,6 +910,7 @@ func (h *AIHandler) resolveTargetSnapshot(targetID, host, token, username, passw
 		TimeoutSec: timeoutSec,
 		Username:   username,
 		Password:   password,
+		CreatedAt:  time.Now(),
 	}
 }
 

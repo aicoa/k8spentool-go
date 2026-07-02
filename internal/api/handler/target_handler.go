@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +117,11 @@ func (h *TargetHandler) CreateTarget(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
+	req.Host = strings.TrimSpace(req.Host)
+	if req.Host == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
+		return
+	}
 	// Auto-detect auth type from provided credentials
 	if req.AuthType == "" {
 		if req.Token != "" {
@@ -125,6 +131,28 @@ func (h *TargetHandler) CreateTarget(c *gin.Context) {
 		} else {
 			req.AuthType = "none"
 		}
+	}
+
+	h.mu.Lock()
+
+	_, existing := h.findSessionByEndpointLocked(req.Host, req.Port)
+	if existing != nil && existing.Target != nil {
+		existing.Target.Host = req.Host
+		existing.Target.Port = req.Port
+		existing.Target.Token = req.Token
+		existing.Target.AuthType = engine.AuthType(req.AuthType)
+		existing.Target.SkipTLS = req.SkipTLS
+		existing.Target.TimeoutSec = req.TimeoutSec
+		existing.Target.Username = req.Username
+		existing.Target.Password = req.Password
+		existing.Target.Kubeconfig = req.Kubeconfig
+		if existing.Target.CreatedAt.IsZero() {
+			existing.Target.CreatedAt = time.Now()
+		}
+		h.mu.Unlock()
+		h.saveSession(existing)
+		c.JSON(http.StatusCreated, existing.Target)
+		return
 	}
 
 	target := &engine.Target{
@@ -138,9 +166,9 @@ func (h *TargetHandler) CreateTarget(c *gin.Context) {
 		Username:   req.Username,
 		Password:   req.Password,
 		Kubeconfig: req.Kubeconfig,
+		CreatedAt:  time.Now(),
 	}
 
-	h.mu.Lock()
 	h.sessions[target.ID] = engine.NewSessionState(target)
 	created := h.sessions[target.ID]
 	h.mu.Unlock()
@@ -164,6 +192,24 @@ func (h *TargetHandler) ListTargets(c *gin.Context) {
 	for _, s := range h.sessions {
 		targets = append(targets, s.Target)
 	}
+	sort.Slice(targets, func(i, j int) bool {
+		left := targets[i]
+		right := targets[j]
+		switch {
+		case left == nil && right == nil:
+			return false
+		case left == nil:
+			return false
+		case right == nil:
+			return true
+		case !left.CreatedAt.Equal(right.CreatedAt):
+			return left.CreatedAt.After(right.CreatedAt)
+		case !strings.EqualFold(left.Host, right.Host):
+			return strings.ToLower(left.Host) < strings.ToLower(right.Host)
+		default:
+			return left.ID < right.ID
+		}
+	})
 	c.JSON(http.StatusOK, targets)
 }
 
@@ -320,4 +366,20 @@ func parseRiskLevel(level string) engine.RiskLevel {
 	default:
 		return engine.RiskInfo
 	}
+}
+
+func (h *TargetHandler) findSessionByEndpointLocked(host string, port int) (string, *engine.SessionState) {
+	normalizedHost := strings.ToLower(strings.TrimSpace(host))
+	for id, session := range h.sessions {
+		if session == nil || session.Target == nil {
+			continue
+		}
+		if session.Target.Port != port {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(session.Target.Host)) == normalizedHost {
+			return id, session
+		}
+	}
+	return "", nil
 }

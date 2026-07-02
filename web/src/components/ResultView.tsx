@@ -292,9 +292,14 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
     return <div style={{ position: 'relative' }}><CopyBtn text={result} /><pre style={preStyle}>{result}</pre></div>;
   }
 
-  // 错误优先
-  if (result.error) {
-    return <Alert type="error" showIcon message="请求出错" description={String(result.error)} style={{ marginTop: 4 }} />;
+  const errorBanner = result?.error ? (
+    <Alert type="error" showIcon message="请求出错" description={String(result.error)} style={{ marginBottom: 8 }} />
+  ) : null;
+  const detailKeys = result && typeof result === 'object'
+    ? Object.keys(result).filter((key) => key !== 'error')
+    : [];
+  if (errorBanner && detailKeys.length === 0) {
+    return errorBanner;
   }
 
   // is_admin 标志位 — 显示为告警横幅，不吞掉同响应的权限表格
@@ -310,6 +315,7 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
     const contextNotes = buildContextNotes(result);
 	    return (
 	      <div>
+        {errorBanner}
         {adminWarning}
         {typeof result.total === 'number' && (
           <Text type="secondary" style={{ fontSize: 11 }}>共 {result.total} 条</Text>
@@ -369,6 +375,7 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
       const contextNotes = buildContextNotes(result);
       return (
         <div>
+          {errorBanner}
           <Text type="secondary" style={{ fontSize: 11 }}>{parsed.title}（共 {parsed.rows.length} 条）</Text>
           {result.command && <Text code style={{ fontSize: 10, marginLeft: 8 }}>{String(result.command)}</Text>}
           {contextNotes.length > 0 && (
@@ -399,6 +406,7 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
     // 无法解析为表格 → 落回纯文本 pre
     return (
       <div>
+        {errorBanner}
         {result.command && <Text code style={{ fontSize: 10 }}>{String(result.command)}</Text>}
         {result._exit_hint && (
           <Tag color="orange" style={{ fontSize: 10, marginBottom: 4 }}>{result._exit_hint}</Tag>
@@ -412,7 +420,12 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
 
   // 兜底：折叠 JSON
   const jsonStr = JSON.stringify(result, null, 2);
-  return <div style={{ position: 'relative' }}><CopyBtn text={jsonStr} /><pre style={preStyle}>{jsonStr}</pre></div>;
+  return (
+    <div>
+      {errorBanner}
+      <div style={{ position: 'relative' }}><CopyBtn text={jsonStr} /><pre style={preStyle}>{jsonStr}</pre></div>
+    </div>
+  );
 }
 
 const preStyle: React.CSSProperties = { fontSize: 11, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', background: '#f5f5f5', padding: 8, margin: 0, borderRadius: 4 };

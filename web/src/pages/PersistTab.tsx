@@ -46,7 +46,7 @@ export default function PersistTab({ getAuth, addLog, activeTarget }: Props) {
     try {
       const r = await fn();
       setResult(r);
-      addLog(`[+] ${label}`);
+      addLog(r?.error ? `[-] ${label} failed: ${r.error}` : `[+] ${label}`);
       recordTargetStep(activeTarget, {
         phase: 'persist',
         tool: 'persist',

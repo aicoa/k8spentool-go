@@ -250,6 +250,7 @@ export interface Target {
   auth_type: string;
   skip_tls: boolean;
   timeout_sec: number;
+  created_at?: string;
 }
 
 export interface ProxyConfig {

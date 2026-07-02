@@ -235,9 +235,13 @@ func (h *KubectlHandler) GetDeployments(c *gin.Context) {
 		if len(d.Spec.Template.Spec.Containers) > 0 {
 			image = d.Spec.Template.Spec.Containers[0].Image
 		}
+		replicas := int32(0)
+		if d.Spec.Replicas != nil {
+			replicas = *d.Spec.Replicas
+		}
 		deps = append(deps, gin.H{
 			"namespace": d.Namespace, "name": d.Name,
-			"replicas": *d.Spec.Replicas, "ready": d.Status.ReadyReplicas, "image": image,
+			"replicas": replicas, "ready": d.Status.ReadyReplicas, "image": image,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"deployments": deps, "total": len(deps)})
@@ -464,7 +468,11 @@ func routeCommand(ctx context.Context, client *kubectl.Client, args []string) (s
 				if len(d.Spec.Template.Spec.Containers) > 0 {
 					image = d.Spec.Template.Spec.Containers[0].Image
 				}
-				fmt.Fprintf(&sb, "%s/%s replicas=%d ready=%d %s\n", d.Namespace, d.Name, *d.Spec.Replicas, d.Status.ReadyReplicas, image)
+				replicas := int32(0)
+				if d.Spec.Replicas != nil {
+					replicas = *d.Spec.Replicas
+				}
+				fmt.Fprintf(&sb, "%s/%s replicas=%d ready=%d %s\n", d.Namespace, d.Name, replicas, d.Status.ReadyReplicas, image)
 			}
 			return sb.String(), cmdStr
 		case "serviceaccounts", "serviceaccount", "sa":

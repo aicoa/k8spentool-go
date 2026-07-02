@@ -1002,6 +1002,7 @@ type evaluatePodRequest struct {
 	TargetHost string `json:"target_host" binding:"required"`
 	Namespace  string `json:"namespace"`
 	PodName    string `json:"pod_name" binding:"required"`
+	Container  string `json:"container_name"`
 	Token      string `json:"token"`
 	Username   string `json:"username"`
 	Password   string `json:"password"`
@@ -1065,14 +1066,21 @@ NET=$(ss -tlnp 2>/dev/null | tail -n +2 | head -6 | awk '{print $4}' | tr '\n' '
 echo "{\"check\":\"network_listening\",\"result\":\"$NET\"}"
 echo "=== CDK EVALUATE END ==="
 `
-	// Resolve container name for multi-container pods
-		containerName := ""
+	// Respect the selected container when provided; otherwise fall back to the first pod container.
+	containerName := strings.TrimSpace(req.Container)
+	if containerName == "" {
 		if pod, getErr := client.GetPod(ctx, req.Namespace, req.PodName); getErr == nil && len(pod.Spec.Containers) > 0 {
 			containerName = pod.Spec.Containers[0].Name
 		}
-		result, err := client.ExecInPodResult(ctx, req.Namespace, req.PodName, containerName, []string{"sh", "-c", evalScript})
+	}
+	result, err := client.ExecInPodResult(ctx, req.Namespace, req.PodName, containerName, []string{"sh", "-c", evalScript})
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": "exec failed: " + err.Error(), "pod": req.PodName, "namespace": req.Namespace})
+		c.JSON(http.StatusOK, gin.H{
+			"error":     "exec failed: " + err.Error(),
+			"pod":       req.PodName,
+			"namespace": req.Namespace,
+			"container": containerName,
+		})
 		return
 	}
 
@@ -1094,9 +1102,13 @@ echo "=== CDK EVALUATE END ==="
 
 	summary := evaluatePodSummary(checks)
 	c.JSON(http.StatusOK, gin.H{
-		"pod": req.PodName, "namespace": req.Namespace,
-		"checks": checks, "total": len(checks),
-		"summary": summary, "raw": output,
+		"pod":       req.PodName,
+		"namespace": req.Namespace,
+		"container": containerName,
+		"checks":    checks,
+		"total":     len(checks),
+		"summary":   summary,
+		"raw":       output,
 	})
 }
 

@@ -33,7 +33,7 @@ export default function DashboardTab({ getAuth, addLog, activeTarget }: Props) {
     try {
       const r = await fn();
       setResult(r);
-      addLog(`[Dashboard] ${label}`);
+      addLog(r?.error ? `[Dashboard] ${label} failed: ${r.error}` : `[Dashboard] ${label}`);
       recordTargetStep(activeTarget, {
         phase: 'access',
         tool: 'dashboard',

@@ -195,25 +195,35 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		}, "check RBAC permissions", "list pods if access is granted")
 
 	case "access_kubelet":
-		var p struct{ TargetHost string }
+		var p struct {
+			TargetHost string
+			Token      string
+		}
 		_ = json.Unmarshal([]byte(args), &p)
 		host := orDefault(p.TargetHost, auth.Host)
+		token := orDefault(p.Token, auth.Token)
 		url := "https://" + host + ":10250/pods"
-		code, body, err := util.SendRequest(url, "GET", "", auth.timeout(), auth.SkipTLS)
+		code, body, err := util.SendRequest(url, "GET", token, auth.timeout(), auth.SkipTLS)
 		if err != nil {
 			return mkData("ok", fmt.Sprintf("Kubelet %s:10250 not accessible: %v", host, err), map[string]interface{}{
-				"host":         host,
-				"accessible":   false,
-				"error":        err.Error(),
-				"status_code":  0,
-				"body_preview": "",
+				"host":          host,
+				"accessible":    false,
+				"error":         err.Error(),
+				"status_code":   0,
+				"body_preview":  "",
+				"authenticated": token != "",
 			})
 		}
-		return mkData("ok", fmt.Sprintf("Kubelet %s:10250 HTTP %d (unauth). pods body head: %s", host, code, preview(string(body))), map[string]interface{}{
-			"host":         host,
-			"accessible":   true,
-			"status_code":  code,
-			"body_preview": preview(string(body)),
+		mode := "unauth"
+		if token != "" {
+			mode = "auth"
+		}
+		return mkData("ok", fmt.Sprintf("Kubelet %s:10250 HTTP %d (%s). pods body head: %s", host, code, mode, preview(string(body))), map[string]interface{}{
+			"host":          host,
+			"accessible":    true,
+			"status_code":   code,
+			"body_preview":  preview(string(body)),
+			"authenticated": token != "",
 		}, "try kubelet exec", "compare with APIServer exposure")
 
 	case "access_etcd_check":

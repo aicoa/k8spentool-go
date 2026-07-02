@@ -10,14 +10,13 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "info_port_scan",
-			Description: "Scan target for open K8s ports (6443, 10250, 2379, 8080, 10255, 443, 8443)",
+			Description: "Scan the current target for open K8s ports (6443, 10250, 2379, 8080, 10255, 443, 8443). host defaults to the current AI session target when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"host": map[string]interface{}{"type": "string", "description": "Target host IP"},
+					"host":  map[string]interface{}{"type": "string", "description": "Target host IP"},
 					"ports": map[string]interface{}{"type": "string", "description": "Ports to scan, comma-separated or range", "default": "6443,10250,2379,8080,10255"},
 				},
-				"required": []string{"host"},
 			},
 		},
 	},
@@ -25,14 +24,13 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "info_run_evaluate",
-			Description: "Run CDK-style container/K8s environment evaluation profile",
+			Description: "Run CDK-style container/K8s environment evaluation profile against the current AI session target unless target_host is explicitly provided.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"target_host": map[string]interface{}{"type": "string", "description": "Target host"},
 					"profile":     map[string]interface{}{"type": "string", "enum": []string{"basic", "extended", "full"}, "default": "basic"},
 				},
-				"required": []string{"target_host"},
 			},
 		},
 	},
@@ -41,14 +39,13 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "access_apiserver",
-			Description: "Check APIServer access on port 6443 (secure) or 8080 (insecure)",
+			Description: "Check APIServer access on the current AI session target. target_host and token default to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"target_host": map[string]interface{}{"type": "string", "description": "Target host"},
 					"token":       map[string]interface{}{"type": "string", "description": "Bearer token if available"},
 				},
-				"required": []string{"target_host"},
 			},
 		},
 	},
@@ -56,13 +53,13 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "access_kubelet",
-			Description: "Check Kubelet unauthenticated access on port 10250",
+			Description: "Check Kubelet access on the current AI session target. target_host and token default to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"target_host": map[string]interface{}{"type": "string"},
+					"token":       map[string]interface{}{"type": "string", "description": "Optional bearer token for authenticated kubelet access"},
 				},
-				"required": []string{"target_host"},
 			},
 		},
 	},
@@ -70,13 +67,12 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "access_etcd_check",
-			Description: "Check Etcd unauthorized access on port 2379",
+			Description: "Check Etcd unauthorized access on the current AI session target unless target_host is explicitly provided.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"target_host": map[string]interface{}{"type": "string"},
 				},
-				"required": []string{"target_host"},
 			},
 		},
 	},
@@ -84,14 +80,13 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "access_dashboard",
-			Description: "Check K8s Dashboard unauthenticated access",
+			Description: "Check K8s Dashboard access on the current AI session target unless target_host is explicitly provided.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"target_host": map[string]interface{}{"type": "string"},
 					"port":        map[string]interface{}{"type": "integer", "default": 30443},
 				},
-				"required": []string{"target_host"},
 			},
 		},
 	},
@@ -100,7 +95,7 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "exec_list_pods",
-			Description: "List all pods via APIServer or Kubelet",
+			Description: "List pods for the current AI session target. target_host and token default to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -108,7 +103,6 @@ var Tools = []ToolDefinition{
 					"token":       map[string]interface{}{"type": "string"},
 					"namespace":   map[string]interface{}{"type": "string", "default": ""},
 				},
-				"required": []string{"target_host"},
 			},
 		},
 	},
@@ -116,17 +110,18 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "exec_command",
-			Description: "Execute command in a pod",
+			Description: "Execute a command in a pod on the current AI session target. target_host and token default to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"target_host": map[string]interface{}{"type": "string"},
-					"namespace":   map[string]interface{}{"type": "string", "default": "default"},
-					"pod_name":    map[string]interface{}{"type": "string"},
-					"command":     map[string]interface{}{"type": "string"},
-					"token":       map[string]interface{}{"type": "string"},
+					"target_host":    map[string]interface{}{"type": "string"},
+					"namespace":      map[string]interface{}{"type": "string", "default": "default"},
+					"pod_name":       map[string]interface{}{"type": "string"},
+					"container_name": map[string]interface{}{"type": "string", "description": "Optional container name when the pod has multiple containers"},
+					"command":        map[string]interface{}{"type": "string"},
+					"token":          map[string]interface{}{"type": "string"},
 				},
-				"required": []string{"target_host", "pod_name", "command"},
+				"required": []string{"pod_name", "command"},
 			},
 		},
 	},
@@ -135,14 +130,14 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "lateral_list_secrets",
-			Description: "List all secrets in the cluster (requires API access)",
+			Description: "List all secrets in the cluster for the current AI session target. token defaults to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"target_host": map[string]interface{}{"type": "string"},
 					"token":       map[string]interface{}{"type": "string"},
+					"namespace":   map[string]interface{}{"type": "string", "default": ""},
 				},
-				"required": []string{"target_host", "token"},
 			},
 		},
 	},
@@ -150,7 +145,7 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "lateral_view_secret",
-			Description: "View and decode a specific secret",
+			Description: "View and decode a specific secret on the current AI session target. token defaults to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -159,7 +154,7 @@ var Tools = []ToolDefinition{
 					"secret_name": map[string]interface{}{"type": "string"},
 					"token":       map[string]interface{}{"type": "string"},
 				},
-				"required": []string{"target_host", "namespace", "secret_name", "token"},
+				"required": []string{"namespace", "secret_name"},
 			},
 		},
 	},
@@ -167,14 +162,14 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "lateral_discover_services",
-			Description: "Discover services and endpoints in the cluster",
+			Description: "Discover services and endpoints in the cluster for the current AI session target. token defaults to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"target_host": map[string]interface{}{"type": "string"},
 					"token":       map[string]interface{}{"type": "string"},
+					"namespace":   map[string]interface{}{"type": "string", "default": ""},
 				},
-				"required": []string{"target_host", "token"},
 			},
 		},
 	},
@@ -183,7 +178,7 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "persist_create_admin_sa",
-			Description: "Create a high-privilege ServiceAccount with cluster-admin binding (DESTRUCTIVE)",
+			Description: "Create a high-privilege ServiceAccount with cluster-admin binding on the current AI session target (DESTRUCTIVE). token defaults to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -191,7 +186,6 @@ var Tools = []ToolDefinition{
 					"token":       map[string]interface{}{"type": "string"},
 					"namespace":   map[string]interface{}{"type": "string", "default": "kube-system"},
 				},
-				"required": []string{"target_host", "token"},
 			},
 		},
 	},
@@ -199,7 +193,7 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "persist_cronjob",
-			Description: "Deploy a CronJob backdoor (DESTRUCTIVE)",
+			Description: "Deploy a CronJob backdoor on the current AI session target (DESTRUCTIVE). token defaults to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -208,7 +202,7 @@ var Tools = []ToolDefinition{
 					"lhost":       map[string]interface{}{"type": "string", "description": "Callback host for reverse shell"},
 					"lport":       map[string]interface{}{"type": "string", "description": "Callback port"},
 				},
-				"required": []string{"target_host", "token", "lhost", "lport"},
+				"required": []string{"lhost", "lport"},
 			},
 		},
 	},
@@ -228,7 +222,7 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "escape_privileged",
-			Description: "Attempt privileged container escape (DESTRUCTIVE)",
+			Description: "Attempt privileged container escape on the current AI session target (DESTRUCTIVE). target_host defaults to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -237,7 +231,7 @@ var Tools = []ToolDefinition{
 					"lhost":       map[string]interface{}{"type": "string"},
 					"lport":       map[string]interface{}{"type": "string"},
 				},
-				"required": []string{"target_host", "pod_name", "lhost", "lport"},
+				"required": []string{"pod_name", "lhost", "lport"},
 			},
 		},
 	},
@@ -246,7 +240,7 @@ var Tools = []ToolDefinition{
 		Type: "function",
 		Function: FunctionDef{
 			Name:        "kubectl_exec",
-			Description: "Execute arbitrary kubectl command",
+			Description: "Execute an arbitrary kubectl-style command on the current AI session target. target_host and token default to the current session when omitted.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -254,7 +248,7 @@ var Tools = []ToolDefinition{
 					"token":       map[string]interface{}{"type": "string"},
 					"command":     map[string]interface{}{"type": "string", "description": "kubectl command without 'kubectl' prefix, e.g. 'get pods -A'"},
 				},
-				"required": []string{"target_host", "command"},
+				"required": []string{"command"},
 			},
 		},
 	},

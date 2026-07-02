@@ -461,6 +461,7 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 	var req struct {
 		TargetHost string `json:"target_host" binding:"required"`
 		SSHKey     string `json:"ssh_pub_key" binding:"required"`
+		Token      string `json:"token"`
 		TimeoutSec int    `json:"timeout_sec"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
@@ -473,7 +474,7 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 	}
 
 	url := "https://" + req.TargetHost + ":10250/pods"
-	code, body, err := util.SendRequest(url, "GET", "", req.TimeoutSec, req.SkipTLS)
+	code, body, err := util.SendRequest(url, "GET", req.Token, req.TimeoutSec, req.SkipTLS)
 	if err != nil || code != 200 {
 		c.JSON(http.StatusOK, gin.H{"error": "Failed to list pods via Kubelet", "status_code": code})
 		return
@@ -506,7 +507,7 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 
 			sshCmd := fmt.Sprintf("mkdir -p /root/.ssh 2>/dev/null && printf '%%s\\n' %s >> /root/.ssh/authorized_keys 2>/dev/null && chmod 600 /root/.ssh/authorized_keys 2>/dev/null && echo 'SSH_KEY_INJECTED' || echo 'FAILED'",
 				quotedKey)
-			ec, eb, execErr := util.SendPost(execUrl, encodeKubeletCommandForm(sshCmd), "application/x-www-form-urlencoded", "", req.TimeoutSec, req.SkipTLS)
+			ec, eb, execErr := util.SendPost(execUrl, encodeKubeletCommandForm(sshCmd), "application/x-www-form-urlencoded", req.Token, req.TimeoutSec, req.SkipTLS)
 
 			result := gin.H{
 				"namespace": ns,

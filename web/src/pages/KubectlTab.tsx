@@ -30,7 +30,7 @@ export default function KubectlTab({ getAuth, addLog, activeTarget, sharedPods, 
       if (sharePodsSource && Array.isArray(r?.pods)) {
         onUpdateSharedPods(r.pods, sharePodsSource, { autoSelectFirst: !sharedPodSelection });
       }
-      addLog(`[+] ${label}`);
+      addLog(r?.error ? `[-] ${label} failed: ${r.error}` : `[+] ${label}`);
       recordTargetStep(activeTarget, {
         phase: 'kubectl',
         tool: 'kubectl',
