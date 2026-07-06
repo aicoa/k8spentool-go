@@ -11,6 +11,7 @@ import (
 	"github.com/trymonoly/K8sPenTool-ng/internal/kubectl"
 	"github.com/trymonoly/K8sPenTool-ng/internal/util"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // AuthCreds 是工具执行所需的鉴权凭证，由 AISession 在创建时持有。
@@ -37,6 +38,12 @@ func (a *AuthCreds) server() string {
 // buildK8sClient 复用 kubectl_handler / lateral_handler 的同款 client 构造逻辑。
 func (a *AuthCreds) buildK8sClient() (*kubectl.Client, error) {
 	return kubectl.NewTargetClient(a.Host, a.Token, a.Username, a.Password, a.SkipTLS)
+}
+
+func (a *AuthCreds) buildK8sClientFor(host, token string) (*kubectl.Client, error) {
+	targetHost := orDefault(host, a.Host)
+	targetToken := orDefault(token, a.Token)
+	return kubectl.NewTargetClient(targetHost, targetToken, a.Username, a.Password, a.SkipTLS)
 }
 
 // ToolTrace 是单次工具调用的执行轨迹，回传给前端展示。
@@ -169,8 +176,10 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		}, "probe APIServer access", "check dashboard exposure")
 
 	case "info_run_evaluate":
+		var p struct{ TargetHost string }
+		_ = json.Unmarshal([]byte(args), &p)
 		// 简化：复用 access 探测汇总环境
-		summary := runEnvSummary(ctx, auth)
+		summary := runEnvSummary(ctx, auth, p.TargetHost)
 		return mkData("ok", "environment evaluation completed", map[string]interface{}{
 			"raw_text": summary,
 		}, "analyze RBAC permissions", "look for privileged pods")
@@ -182,16 +191,19 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		host := orDefault(p.TargetHost, auth.Host)
 		token := orDefault(p.Token, auth.Token)
 		url := kubectl.APIServerURL(host) + "/api/v1/namespaces"
-		code, body, err := util.SendRequest(url, "GET", token, auth.timeout(), auth.SkipTLS)
+		code, body, err := util.SendRequestWithAuth(url, "GET", token, auth.Username, auth.Password, auth.timeout(), auth.SkipTLS)
 		if err != nil {
 			return errRes(err)
 		}
-		anon := token == ""
+		anon := token == "" && auth.Username == "" && auth.Password == ""
 		return mkData("ok", fmt.Sprintf("APIServer %s HTTP %d (anon=%v). body head: %s", kubectl.APIServerURL(host), code, anon, preview(string(body))), map[string]interface{}{
-			"host":         host,
-			"status_code":  code,
-			"anonymous":    anon,
-			"body_preview": preview(string(body)),
+			"host":          host,
+			"reachable":     true,
+			"accessible":    code >= 200 && code < 300,
+			"status_code":   code,
+			"anonymous":     anon,
+			"authenticated": !anon,
+			"body_preview":  preview(string(body)),
 		}, "check RBAC permissions", "list pods if access is granted")
 
 	case "access_kubelet":
@@ -202,42 +214,46 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 		_ = json.Unmarshal([]byte(args), &p)
 		host := orDefault(p.TargetHost, auth.Host)
 		token := orDefault(p.Token, auth.Token)
-		url := "https://" + host + ":10250/pods"
-		code, body, err := util.SendRequest(url, "GET", token, auth.timeout(), auth.SkipTLS)
+		url := kubectl.TargetServiceURL(host, "https", 10250, "/pods")
+		code, body, err := util.SendRequestWithAuth(url, "GET", token, auth.Username, auth.Password, auth.timeout(), auth.SkipTLS)
 		if err != nil {
 			return mkData("ok", fmt.Sprintf("Kubelet %s:10250 not accessible: %v", host, err), map[string]interface{}{
 				"host":          host,
+				"reachable":     false,
 				"accessible":    false,
 				"error":         err.Error(),
 				"status_code":   0,
 				"body_preview":  "",
-				"authenticated": token != "",
+				"authenticated": token != "" || auth.Username != "" || auth.Password != "",
 			})
 		}
 		mode := "unauth"
 		if token != "" {
 			mode = "auth"
+		} else if auth.Username != "" || auth.Password != "" {
+			mode = "basic"
 		}
 		return mkData("ok", fmt.Sprintf("Kubelet %s:10250 HTTP %d (%s). pods body head: %s", host, code, mode, preview(string(body))), map[string]interface{}{
 			"host":          host,
-			"accessible":    true,
+			"reachable":     true,
+			"accessible":    code >= 200 && code < 300,
 			"status_code":   code,
 			"body_preview":  preview(string(body)),
-			"authenticated": token != "",
+			"authenticated": token != "" || auth.Username != "" || auth.Password != "",
 		}, "try kubelet exec", "compare with APIServer exposure")
 
 	case "access_etcd_check":
 		var p struct{ TargetHost string }
 		_ = json.Unmarshal([]byte(args), &p)
 		host := orDefault(p.TargetHost, auth.Host)
-		if !util.IsPortOpen(host, 2379, 3) {
+		if !util.IsPortOpen(kubectl.TargetHostname(host), 2379, 3) {
 			return mkData("ok", fmt.Sprintf("etcd %s:2379 closed", host), map[string]interface{}{
 				"host":        host,
 				"port_open":   false,
 				"status_code": 0,
 			})
 		}
-		url := "http://" + host + ":2379/v2/keys"
+		url := kubectl.TargetServiceURL(host, "http", 2379, "/v2/keys")
 		code, body, err := util.SendRequest(url, "GET", "", auth.timeout(), false)
 		if err != nil {
 			return mkData("ok", fmt.Sprintf("etcd %s:2379 open but error: %v", host, err), map[string]interface{}{
@@ -288,7 +304,7 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 			TargetHost, Token, Namespace string
 		}
 		_ = json.Unmarshal([]byte(args), &p)
-		client, err := auth.buildK8sClient()
+		client, err := auth.buildK8sClientFor(p.TargetHost, p.Token)
 		if err != nil {
 			return errRes(err)
 		}
@@ -309,10 +325,32 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 			TargetHost, Namespace, PodName, ContainerName, Command, Token string
 		}
 		_ = json.Unmarshal([]byte(args), &p)
+		p.PodName = strings.TrimSpace(p.PodName)
+		p.Namespace = strings.TrimSpace(p.Namespace)
+		p.ContainerName = strings.TrimSpace(p.ContainerName)
+		p.Command = strings.TrimSpace(p.Command)
+		if strings.Count(p.PodName, "/") == 1 {
+			parts := strings.SplitN(p.PodName, "/", 2)
+			if p.Namespace == "" {
+				p.Namespace = strings.TrimSpace(parts[0])
+			}
+			p.PodName = strings.TrimSpace(parts[1])
+		}
 		if p.Namespace == "" {
 			p.Namespace = "default"
 		}
-		client, err := auth.buildK8sClient()
+		if p.PodName == "" {
+			return mkPayload("error", "pod_name is required; select a pod in the web UI or pass namespace/pod_name explicitly", map[string]interface{}{
+				"namespace": p.Namespace,
+			}, []string{
+				"reuse the selected pod from the AI session UI context",
+				"pass pod_name explicitly, for example default/nginx-abc123",
+			}, "missing pod_name")
+		}
+		if p.Command == "" {
+			return mk("error", "command is required")
+		}
+		client, err := auth.buildK8sClientFor(p.TargetHost, p.Token)
 		if err != nil {
 			return errRes(err)
 		}
@@ -341,7 +379,7 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 			TargetHost, Token, Namespace string
 		}
 		_ = json.Unmarshal([]byte(args), &p)
-		client, err := auth.buildK8sClient()
+		client, err := auth.buildK8sClientFor(p.TargetHost, p.Token)
 		if err != nil {
 			return errRes(err)
 		}
@@ -362,7 +400,37 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 			TargetHost, Namespace, SecretName, Token string
 		}
 		_ = json.Unmarshal([]byte(args), &p)
-		client, err := auth.buildK8sClient()
+		p.Namespace = strings.TrimSpace(p.Namespace)
+		p.SecretName = strings.TrimSpace(p.SecretName)
+		if strings.Count(p.SecretName, "/") == 1 {
+			parts := strings.SplitN(p.SecretName, "/", 2)
+			if p.Namespace == "" {
+				p.Namespace = strings.TrimSpace(parts[0])
+			}
+			p.SecretName = strings.TrimSpace(parts[1])
+		}
+		if strings.Count(p.Namespace, "/") == 1 && p.SecretName == "" {
+			parts := strings.SplitN(p.Namespace, "/", 2)
+			p.Namespace = strings.TrimSpace(parts[0])
+			p.SecretName = strings.TrimSpace(parts[1])
+		}
+		if p.SecretName == "" {
+			return mkPayload("error", "secret_name is required; pass namespace/secret or set secret_name explicitly", map[string]interface{}{
+				"namespace": p.Namespace,
+			}, []string{
+				"use lateral_list_secrets first to choose a secret name",
+				"pass a shorthand like kube-system/admin-user-token-xxxx",
+			}, "missing secret_name")
+		}
+		if p.Namespace == "" {
+			return mkPayload("error", "namespace is required; pass namespace/secret or set namespace explicitly", map[string]interface{}{
+				"secret_name": p.SecretName,
+			}, []string{
+				"pass a shorthand like kube-system/admin-user-token-xxxx",
+				"reuse the namespace shown by lateral_list_secrets",
+			}, "missing namespace")
+		}
+		client, err := auth.buildK8sClientFor(p.TargetHost, p.Token)
 		if err != nil {
 			return errRes(err)
 		}
@@ -383,7 +451,7 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 			TargetHost, Token, Namespace string
 		}
 		_ = json.Unmarshal([]byte(args), &p)
-		client, err := auth.buildK8sClient()
+		client, err := auth.buildK8sClientFor(p.TargetHost, p.Token)
 		if err != nil {
 			return errRes(err)
 		}
@@ -451,7 +519,7 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 			TargetHost, Token, Command string
 		}
 		_ = json.Unmarshal([]byte(args), &p)
-		client, err := auth.buildK8sClient()
+		client, err := auth.buildK8sClientFor(p.TargetHost, p.Token)
 		if err != nil {
 			return errRes(err)
 		}
@@ -475,20 +543,44 @@ func Dispatch(ctx context.Context, call ToolCall, auth *AuthCreds) DispatchResul
 			})
 		case "auth":
 			if len(cargs) >= 2 && cargs[1] == "can-i" {
-				ok, e := client.CheckSelfPermissions(cctx, "", "*", "*")
+				if len(cargs) >= 3 && cargs[2] == "--list" {
+					return kubectlAuthCanIList(cctx, client)
+				}
+				verb, resource, namespace := "*", "*", ""
+				if len(cargs) >= 3 {
+					verb = cargs[2]
+				}
+				if len(cargs) >= 4 {
+					resource = cargs[3]
+				}
+				for i := 4; i < len(cargs); i++ {
+					if (cargs[i] == "-n" || cargs[i] == "--namespace") && i+1 < len(cargs) {
+						namespace = cargs[i+1]
+						i++
+					}
+				}
+				if isClusterScopedAIResource(resource) {
+					namespace = ""
+				}
+				ok, e := client.CheckSelfPermissions(cctx, namespace, verb, resource)
 				if e != nil {
 					return errRes(e)
 				}
-				if ok {
-					return mkData("ok", "can-i *:* = yes (cluster-admin)", map[string]interface{}{
-						"cluster_admin": true,
-					})
+				summary := fmt.Sprintf("can-i %s %s = %v", verb, resource, ok)
+				if verb == "*" && resource == "*" && ok {
+					summary = "can-i *:* = yes (cluster-admin)"
+				} else if verb == "*" && resource == "*" {
+					summary = "can-i *:* = no"
 				}
-				return mkData("ok", "can-i *:* = no", map[string]interface{}{
-					"cluster_admin": false,
+				return mkData("ok", summary, map[string]interface{}{
+					"verb":          verb,
+					"resource":      resource,
+					"namespace":     namespace,
+					"allowed":       ok,
+					"cluster_admin": verb == "*" && resource == "*" && ok,
 				})
 			}
-			return mk("ok", "auth: only 'auth can-i --list' is supported via client-go")
+			return mk("ok", "auth: supported forms are 'auth can-i --list' and 'auth can-i <verb> <resource> [-n namespace]'")
 		default:
 			return mkData("ok", fmt.Sprintf("Cross-platform client-go mode: '%s' command routed via K8s API SDK. Use dedicated tools for list/exec operations.", verb), map[string]interface{}{
 				"verb":    verb,
@@ -612,9 +704,9 @@ func escapeCheckText() string {
 请通过 exec_command 在 Pod 内运行上述命令收集证据。`
 }
 
-func runEnvSummary(ctx context.Context, auth *AuthCreds) string {
+func runEnvSummary(ctx context.Context, auth *AuthCreds, overrideHost string) string {
 	var b strings.Builder
-	client, err := auth.buildK8sClient()
+	client, err := auth.buildK8sClientFor(overrideHost, "")
 	if err != nil {
 		return fmt.Sprintf("evaluate: build client failed: %v", err)
 	}
@@ -815,7 +907,114 @@ func kubectlGet(ctx context.Context, client *kubectl.Client, args []string) Disp
 			fmt.Fprintf(&sb, "%s/%s %s clusterIP=%s\n", s.Namespace, s.Name, s.Spec.Type, s.Spec.ClusterIP)
 		}
 		return mk("ok", fmt.Sprintf("%d services listed", len(list.Items)), map[string]interface{}{"resource": "services", "count": len(list.Items), "raw_text": sb.String()})
+	case "deployments", "deployment", "deploy":
+		list, e := client.Clientset.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
+		if e != nil {
+			return mk("error", e.Error(), nil)
+		}
+		var sb strings.Builder
+		for _, d := range list.Items {
+			fmt.Fprintf(&sb, "%s/%s ready=%d/%d\n", d.Namespace, d.Name, d.Status.ReadyReplicas, d.Status.Replicas)
+		}
+		return mk("ok", fmt.Sprintf("%d deployments listed", len(list.Items)), map[string]interface{}{"resource": "deployments", "count": len(list.Items), "raw_text": sb.String()})
+	case "serviceaccounts", "serviceaccount", "sa":
+		list, e := client.ListServiceAccounts(ctx, ns)
+		if e != nil {
+			return mk("error", e.Error(), nil)
+		}
+		var sb strings.Builder
+		for _, sa := range list.Items {
+			fmt.Fprintf(&sb, "%s/%s secrets=%d\n", sa.Namespace, sa.Name, len(sa.Secrets))
+		}
+		return mk("ok", fmt.Sprintf("%d serviceaccounts listed", len(list.Items)), map[string]interface{}{"resource": "serviceaccounts", "count": len(list.Items), "raw_text": sb.String()})
+	case "clusterrolebindings", "clusterrolebinding", "crb":
+		list, e := client.Clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+		if e != nil {
+			return mk("error", e.Error(), nil)
+		}
+		var sb strings.Builder
+		for _, crb := range list.Items {
+			fmt.Fprintf(&sb, "%s role=%s subjects=%d\n", crb.Name, crb.RoleRef.Name, len(crb.Subjects))
+		}
+		return mk("ok", fmt.Sprintf("%d clusterrolebindings listed", len(list.Items)), map[string]interface{}{"resource": "clusterrolebindings", "count": len(list.Items), "raw_text": sb.String()})
+	case "daemonsets", "daemonset", "ds":
+		list, e := client.Clientset.AppsV1().DaemonSets(ns).List(ctx, metav1.ListOptions{})
+		if e != nil {
+			return mk("error", e.Error(), nil)
+		}
+		var sb strings.Builder
+		for _, ds := range list.Items {
+			fmt.Fprintf(&sb, "%s/%s ready=%d/%d\n", ds.Namespace, ds.Name, ds.Status.NumberReady, ds.Status.DesiredNumberScheduled)
+		}
+		return mk("ok", fmt.Sprintf("%d daemonsets listed", len(list.Items)), map[string]interface{}{"resource": "daemonsets", "count": len(list.Items), "raw_text": sb.String()})
+	case "cronjobs", "cronjob", "cj":
+		list, e := client.Clientset.BatchV1().CronJobs(ns).List(ctx, metav1.ListOptions{})
+		if e != nil {
+			return mk("error", e.Error(), nil)
+		}
+		var sb strings.Builder
+		for _, cj := range list.Items {
+			fmt.Fprintf(&sb, "%s/%s schedule=%s suspend=%v\n", cj.Namespace, cj.Name, cj.Spec.Schedule, valueOrFalse(cj.Spec.Suspend))
+		}
+		return mk("ok", fmt.Sprintf("%d cronjobs listed", len(list.Items)), map[string]interface{}{"resource": "cronjobs", "count": len(list.Items), "raw_text": sb.String()})
 	default:
-		return mk("error", "Unsupported resource: "+resource+" (client-go supports: pods/nodes/services/secrets)", map[string]interface{}{"resource": resource})
+		return mk("error", "Unsupported resource: "+resource+" (client-go supports: pods/nodes/services/secrets/deployments/serviceaccounts/clusterrolebindings/daemonsets/cronjobs)", map[string]interface{}{"resource": resource})
 	}
+}
+
+func kubectlAuthCanIList(ctx context.Context, client *kubectl.Client) DispatchResult {
+	payload := ToolResultPayload{
+		OK:      true,
+		Status:  "ok",
+		Tool:    "kubectl_exec",
+		Summary: "auth can-i --list completed",
+	}
+	resources := []string{"pods", "secrets", "services", "deployments", "daemonsets", "cronjobs", "nodes", "serviceaccounts", "configmaps", "namespaces", "roles", "rolebindings", "clusterroles", "clusterrolebindings"}
+	verbs := []string{"get", "list", "watch", "create", "update", "patch", "delete"}
+	results := make([]map[string]interface{}, 0, len(resources))
+	for _, resource := range resources {
+		allowed := make([]string, 0, len(verbs))
+		namespace := ""
+		if !isClusterScopedAIResource(resource) {
+			namespace = "default"
+		}
+		for _, verb := range verbs {
+			if ok, err := client.CheckSelfPermissions(ctx, namespace, verb, resource); err == nil && ok {
+				allowed = append(allowed, verb)
+			}
+		}
+		results = append(results, map[string]interface{}{
+			"resource": resource,
+			"verbs":    allowed,
+		})
+	}
+	payload.Data = map[string]interface{}{
+		"permissions": results,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		body = []byte(`{"ok":false,"status":"error","tool":"kubectl_exec","summary":"marshal tool result failed","error":"marshal tool result failed"}`)
+	}
+	return DispatchResult{
+		Output: string(body),
+		Trace: ToolTrace{
+			Tool:          "kubectl_exec",
+			Args:          "auth can-i --list",
+			ResultPreview: payload.Summary,
+			Status:        payload.Status,
+		},
+	}
+}
+
+func isClusterScopedAIResource(resource string) bool {
+	switch strings.ToLower(strings.TrimSpace(resource)) {
+	case "node", "nodes", "namespace", "namespaces", "clusterrole", "clusterroles", "clusterrolebinding", "clusterrolebindings", "crb":
+		return true
+	default:
+		return false
+	}
+}
+
+func valueOrFalse(v *bool) bool {
+	return v != nil && *v
 }

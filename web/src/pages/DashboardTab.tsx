@@ -25,14 +25,18 @@ function tokenStatusMeta(status?: string) {
 
 export default function DashboardTab({ getAuth, addLog, activeTarget }: Props) {
   const [result, setResult] = useState<any>(null);
+  const [discoverResult, setDiscoverResult] = useState<any>(null);
+  const [probeResult, setProbeResult] = useState<any>(null);
+  const [tokenResult, setTokenResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [probePort, setProbePort] = useState(443);
 
-  const run = async (fn: () => Promise<any>, label: string) => {
+  const run = async (fn: () => Promise<any>, label: string, setStepResult?: (value: any) => void) => {
     setLoading(true); setResult(null);
     try {
       const r = await fn();
       setResult(r);
+      setStepResult?.(r);
       addLog(r?.error ? `[Dashboard] ${label} failed: ${r.error}` : `[Dashboard] ${label}`);
       recordTargetStep(activeTarget, {
         phase: 'access',
@@ -67,18 +71,18 @@ export default function DashboardTab({ getAuth, addLog, activeTarget }: Props) {
       <Card title={<span><SearchOutlined /> Step 1: 发现 Dashboard</span>} size="small"
         style={{ border: '2px solid #1890ff' }}>
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Button type="primary" block onClick={() => run(() => api.dashboard.discover(t), 'Discover dashboards')}
+          <Button type="primary" block onClick={() => run(() => api.dashboard.discover(t), 'Discover dashboards', setDiscoverResult)}
             loading={loading} icon={<SearchOutlined />}>
             搜索 Dashboard (Service/Pod/Deployment/Ingress)
           </Button>
           <Text type="secondary" style={{ fontSize: 10 }}>
             搜索所有命名空间中与 Dashboard 相关的 Service、Pod、Deployment 和 Ingress
           </Text>
-          {result?.found && (
+          {discoverResult?.found && (
             <div style={{ marginTop: 8 }}>
-              <Tag color="green">找到 {result.total_svcs} 个 Service</Tag>
-              <Tag color="blue">{result.total_pods} 个 Pod</Tag>
-              {result.services?.map((s: any, i: number) => (
+              <Tag color="green">找到 {discoverResult.total_svcs} 个 Service</Tag>
+              <Tag color="blue">{discoverResult.total_pods} 个 Pod</Tag>
+              {discoverResult.services?.map((s: any, i: number) => (
                 <div key={i} style={{ fontSize: 11, marginTop: 4 }}>
                   <Text code>{s.namespace}/{s.name}</Text>
                   <Text type="secondary"> → {s.access_url}</Text>
@@ -97,19 +101,19 @@ export default function DashboardTab({ getAuth, addLog, activeTarget }: Props) {
             <Input placeholder="Dashboard端口" value={probePort} onChange={(e) => setProbePort(+e.target.value)}
               style={{ width: 100 }} type="number" />
           </Space>
-          <Button onClick={() => run(() => api.dashboard.probe({ ...t, dashboard_port: probePort }), 'Probe dashboard')}
+          <Button onClick={() => run(() => api.dashboard.probe({ ...t, dashboard_port: probePort }), 'Probe dashboard', setProbeResult)}
             loading={loading}>
             探测 Dashboard 可访问性
           </Button>
           <Text type="secondary" style={{ fontSize: 10 }}>
             探测 Dashboard API 端点、检测 --enable-skip-login、版本识别
           </Text>
-          {result?.accessible && (
+          {probeResult?.accessible && (
             <div style={{ marginTop: 4 }}>
-              <Tag color="green">Dashboard 可访问: {result.url}</Tag>
-              {result.version && <Tag color="blue">版本: {result.version}</Tag>}
-              {result.auth_bypass_possible && <Tag color="red">认证可能被绕过!</Tag>}
-              {result.skip_login_available && <Tag color="orange">发现 Skip Login 迹象</Tag>}
+              <Tag color="green">Dashboard 可访问: {probeResult.url}</Tag>
+              {probeResult.version && <Tag color="blue">版本: {probeResult.version}</Tag>}
+              {probeResult.auth_bypass_possible && <Tag color="red">认证可能被绕过!</Tag>}
+              {probeResult.skip_login_available && <Tag color="orange">发现 Skip Login 迹象</Tag>}
             </div>
           )}
         </Space>
@@ -119,16 +123,16 @@ export default function DashboardTab({ getAuth, addLog, activeTarget }: Props) {
       <Card title={<span><KeyOutlined /> Step 3: 提取 Token</span>} size="small"
         style={{ border: '2px solid #faad14' }}>
         <Space direction="vertical" style={{ width: '100%' }}>
-          <Button danger onClick={() => run(() => api.dashboard.extractToken(t), 'Extract dashboard tokens')}
+          <Button danger onClick={() => run(() => api.dashboard.extractToken(t), 'Extract dashboard tokens', setTokenResult)}
             loading={loading} icon={<ThunderboltOutlined />}>
             提取 Dashboard ServiceAccount Token
           </Button>
           <Text type="secondary" style={{ fontSize: 10 }}>
             通过 API 查找 Dashboard 相关 SA Token，并区分可直接访问 API 与 RBAC 受限的凭据
           </Text>
-          {result?.tokens?.length > 0 && (
+          {tokenResult?.tokens?.length > 0 && (
             <div style={{ marginTop: 8, maxHeight: 200, overflow: 'auto' }}>
-              {result.tokens.map((tok: any, i: number) => {
+              {tokenResult.tokens.map((tok: any, i: number) => {
                 const meta = tokenStatusMeta(tok.token_status);
                 return (
                   <div key={i} style={{ fontSize: 11, marginBottom: 4, padding: 4, background: '#f5f5f5', borderRadius: 4 }}>
@@ -147,7 +151,7 @@ export default function DashboardTab({ getAuth, addLog, activeTarget }: Props) {
               })}
             </div>
           )}
-          {result?.total === 0 && !loading && (
+          {tokenResult?.total === 0 && !loading && (
             <Text type="secondary" style={{ fontSize: 10 }}>
               未找到 Dashboard SA Token。尝试手动: 到 Exec Tab 对 dashboard pod 执行 cat /var/run/secrets/kubernetes.io/serviceaccount/token
             </Text>

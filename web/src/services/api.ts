@@ -5,7 +5,32 @@ async function request(path: string, opts?: RequestInit) {
     headers: { 'Content-Type': 'application/json', ...opts?.headers },
     ...opts,
   });
-  return res.json();
+  const raw = await res.text();
+
+  let parsed: any = {};
+  if (raw.trim()) {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = { raw };
+    }
+  }
+
+  if (!res.ok) {
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return {
+        ...parsed,
+        error: parsed.error || parsed.raw || `HTTP ${res.status}`,
+        status_code: parsed.status_code || res.status,
+      };
+    }
+    return {
+      error: raw || `HTTP ${res.status}`,
+      status_code: res.status,
+    };
+  }
+
+  return parsed;
 }
 
 function post(path: string, body?: unknown) {
@@ -187,6 +212,7 @@ export const api = {
     createSession: (targetId: string, auth?: AuthConfig, uiContext?: AISessionUIContext) => post('/ai/sessions', { target_id: targetId, host: auth?.host, token: auth?.token, username: auth?.username, password: auth?.password, skip_tls: auth?.skip_tls, timeout_sec: auth?.timeout_sec, ui_context: uiContext }),
     getSession: (id: string) => get(`/ai/sessions/${id}`),
     listSessions: () => get('/ai/sessions'),
+    deleteAllSessions: () => request('/ai/sessions', { method: 'DELETE' }),
     chat: (id: string, message: string) => post(`/ai/sessions/${id}/chat`, { message }),
     generatePlan: (id: string, objective?: string) => post(`/ai/sessions/${id}/plan`, { objective }),
     getPlan: (id: string) => get(`/ai/sessions/${id}/plan`),

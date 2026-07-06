@@ -62,7 +62,11 @@ export default function ExecTab({ getAuth, addLog, activeTarget, sharedPods, sha
         addLog(`[+] ${label}: ${r.total || r.pods.length} pods`);
         if (!sharedPodSelection && r.pods.length > 0) {
           const first = r.pods[0];
-          onSelectSharedPod({ namespace: first.namespace || 'default', name: first.name });
+          onSelectSharedPod({
+            namespace: first.namespace || 'default',
+            name: first.name,
+            container: first.containers?.split(',').map((entry: string) => entry.trim()).filter(Boolean)[0] || undefined,
+          });
         }
         // Don't replace the output card with pod list data
       } else {
@@ -109,7 +113,13 @@ export default function ExecTab({ getAuth, addLog, activeTarget, sharedPods, sha
 
   const checkTools = async () => {
     if (!pod) { addLog('[-] 请先选择Pod'); return; }
-    run(() => api.exec.apiExec({ ...t, namespace: ns, pod_name: pod, command: 'echo "=== 可用工具 ==="; for c in curl wget nc bash sh python python3 perl ruby php ss netstat ifconfig ip tcpdump nmap base64 chmod tar gzip; do which $c 2>/dev/null && echo "✅ $c" || true; done; echo "---"; echo "=== /bin 目录 ==="; ls /bin/ /usr/bin/ /usr/local/bin/ 2>/dev/null | head -30' }), 'Detect tools');
+    run(() => api.exec.apiExec({
+      ...t,
+      namespace: ns,
+      pod_name: pod,
+      container_name: container || undefined,
+      command: 'echo "=== 可用工具 ==="; for c in curl wget nc bash sh python python3 perl ruby php ss netstat ifconfig ip tcpdump nmap base64 chmod tar gzip; do which $c 2>/dev/null && echo "✅ $c" || true; done; echo "---"; echo "=== /bin 目录 ==="; ls /bin/ /usr/bin/ /usr/local/bin/ 2>/dev/null | head -30',
+    }), 'Detect tools');
   };
 
   const quickCmds = [
@@ -138,7 +148,7 @@ export default function ExecTab({ getAuth, addLog, activeTarget, sharedPods, sha
   const selectPod = (podName: string, podNs: string, podContainer?: string) => {
     setPod(podName);
     setNs(podNs);
-    if (podContainer !== undefined) setContainer(podContainer);
+    setContainer(podContainer || '');
     onSelectSharedPod({ namespace: podNs || 'default', name: podName, container: podContainer || undefined });
   };
 
@@ -226,7 +236,7 @@ export default function ExecTab({ getAuth, addLog, activeTarget, sharedPods, sha
           <Button onClick={() => run(() => api.exec.kubeletListPods(t), 'List pods via Kubelet', true)}>列出Pod (Kubelet)</Button>
           <Button onClick={() => {
             if (pod.trim()) onSelectSharedPod({ namespace: ns || 'default', name: pod.trim(), container: container.trim() || undefined });
-            run(() => api.exec.kubeletExec({ ...t, namespace: ns, pod_name: pod, command: cmd }), 'Kubelet exec');
+            run(() => api.exec.kubeletExec({ ...t, namespace: ns, pod_name: pod, container_name: container.trim() || undefined, command: cmd }), 'Kubelet exec');
           }}>执行 via Kubelet</Button>
           <Button onClick={() => run(() => api.exec.enumSATokens(t), 'Enum SA tokens')}>枚举SA Token (API)</Button>
         </Space>
@@ -244,7 +254,14 @@ export default function ExecTab({ getAuth, addLog, activeTarget, sharedPods, sha
               if (!uploadLocalPath || !uploadRemotePath) { addLog('[-] 请填写本地和远程路径'); return; }
               if (!pod) { addLog('[-] 请先选择Pod'); return; }
               onSelectSharedPod({ namespace: ns || 'default', name: pod.trim(), container: container.trim() || undefined });
-              run(() => api.exec.uploadFile({ ...t, namespace: ns, pod_name: pod, local_path: uploadLocalPath, remote_path: uploadRemotePath }), `Upload to ${pod}`);
+              run(() => api.exec.uploadFile({
+                ...t,
+                namespace: ns,
+                pod_name: pod,
+                container_name: container.trim() || undefined,
+                local_path: uploadLocalPath,
+                remote_path: uploadRemotePath,
+              }), `Upload to ${pod}`);
             }}>
               上传文件到 Pod
             </Button>

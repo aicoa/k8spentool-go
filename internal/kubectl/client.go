@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"strings"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
@@ -188,6 +190,25 @@ func (c *Client) CreateServiceAccount(ctx context.Context, namespace string, sa 
 	return c.Clientset.CoreV1().ServiceAccounts(namespace).Create(ctx, sa, metav1.CreateOptions{})
 }
 
+func requestServiceAccountToken(ctx context.Context, serviceAccounts typedcorev1.ServiceAccountInterface, name string, expirationSeconds int64) (string, error) {
+	req := &authenticationv1.TokenRequest{}
+	if expirationSeconds > 0 {
+		req.Spec.ExpirationSeconds = &expirationSeconds
+	}
+	token, err := serviceAccounts.CreateToken(ctx, name, req, metav1.CreateOptions{})
+	if err != nil {
+		return "", err
+	}
+	if token == nil || token.Status.Token == "" {
+		return "", fmt.Errorf("service account token request returned an empty token")
+	}
+	return token.Status.Token, nil
+}
+
+func (c *Client) CreateServiceAccountToken(ctx context.Context, namespace, name string, expirationSeconds int64) (string, error) {
+	return requestServiceAccountToken(ctx, c.Clientset.CoreV1().ServiceAccounts(namespace), name, expirationSeconds)
+}
+
 func (c *Client) ListEndpoints(ctx context.Context, namespace string) (*corev1.EndpointsList, error) {
 	if namespace == "" {
 		return c.Clientset.CoreV1().Endpoints("").List(ctx, metav1.ListOptions{})
@@ -265,14 +286,24 @@ func (c *Client) DeleteResource(ctx context.Context, kind, name, namespace strin
 		return c.Clientset.AppsV1().Deployments(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "daemonset", "daemonsets", "ds":
 		return c.Clientset.AppsV1().DaemonSets(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "statefulset", "statefulsets", "sts":
+		return c.Clientset.AppsV1().StatefulSets(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "cronjob", "cronjobs", "cj":
 		return c.Clientset.BatchV1().CronJobs(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "job", "jobs":
 		return c.Clientset.BatchV1().Jobs(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "ingress", "ingresses", "ing":
+		return c.Clientset.NetworkingV1().Ingresses(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "networkpolicy", "networkpolicies", "netpol":
+		return c.Clientset.NetworkingV1().NetworkPolicies(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "secret", "secrets":
 		return c.Clientset.CoreV1().Secrets(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "serviceaccount", "serviceaccounts", "sa":
 		return c.Clientset.CoreV1().ServiceAccounts(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "persistentvolumeclaim", "persistentvolumeclaims", "pvc":
+		return c.Clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	case "persistentvolume", "persistentvolumes", "pv":
+		return c.Clientset.CoreV1().PersistentVolumes().Delete(ctx, name, metav1.DeleteOptions{})
 	case "role", "roles":
 		return c.Clientset.RbacV1().Roles(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	case "rolebinding", "rolebindings", "rb":

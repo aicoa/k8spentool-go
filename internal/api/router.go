@@ -245,6 +245,7 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 		{
 			ai.POST("/sessions", aiH.CreateSession)
 			ai.GET("/sessions", aiH.ListSessions)
+			ai.DELETE("/sessions", aiH.DeleteAllSessions)
 			ai.GET("/sessions/:id", aiH.GetSession)
 			ai.POST("/sessions/:id/chat", aiH.Chat)
 			ai.POST("/sessions/:id/plan", aiH.GeneratePlan)
@@ -266,9 +267,9 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 			cdk.POST("/clusterip-mitm", cdkH.ClusterIPMITM)
 			cdk.POST("/escape-pod", cdkH.GenerateEscapePod)
 			cdk.POST("/assess-escape", cdkH.AssessEscape)
-		cdk.POST("/evaluate-pod", cdkH.EvaluatePod)
-		cdk.POST("/auto-escape", cdkH.AutoEscape)
-		cdk.POST("/services-scan", cdkH.ServicesScan)
+			cdk.POST("/evaluate-pod", cdkH.EvaluatePod)
+			cdk.POST("/auto-escape", cdkH.AutoEscape)
+			cdk.POST("/services-scan", cdkH.ServicesScan)
 		}
 
 		// Dashboard Attack

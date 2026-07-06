@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -28,7 +29,7 @@ func (h *LateralHandler) buildClient(c *gin.Context) (*kubectl.Client, error) {
 		Password   string `json:"password"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindRequestJSON(c, &req); err != nil {
 		return nil, err
 	}
 	return newLateralClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
@@ -65,13 +66,14 @@ func (h *LateralHandler) ListSecrets(c *gin.Context) {
 	}
 	secrets := make([]gin.H, 0, len(list.Items))
 	for _, s := range list.Items {
-		decoded := make(map[string]string)
-		for k, v := range s.Data {
-			decoded[k] = string(v)
+		keyNames := make([]string, 0, len(s.Data))
+		for k := range s.Data {
+			keyNames = append(keyNames, k)
 		}
+		sort.Strings(keyNames)
 		secrets = append(secrets, gin.H{
 			"namespace": s.Namespace, "name": s.Name, "type": string(s.Type),
-			"keys": len(s.Data), "decoded_keys": decoded,
+			"keys": len(s.Data), "key_names": keyNames,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"secrets": secrets, "total": len(secrets)})
@@ -111,13 +113,32 @@ func (h *LateralHandler) ViewSecret(c *gin.Context) {
 	for k, v := range sec.Data {
 		decoded[k] = string(v)
 	}
-	c.JSON(http.StatusOK, gin.H{"namespace": sec.Namespace, "name": sec.Name, "type": string(sec.Type), "decoded_data": decoded})
+	keyNames := make([]string, 0, len(sec.Data))
+	for k := range sec.Data {
+		keyNames = append(keyNames, k)
+	}
+	sort.Strings(keyNames)
+	c.JSON(http.StatusOK, gin.H{
+		"namespace":    sec.Namespace,
+		"name":         sec.Name,
+		"type":         string(sec.Type),
+		"decoded_data": decoded,
+		"secrets": []gin.H{{
+			"namespace":    sec.Namespace,
+			"name":         sec.Name,
+			"type":         string(sec.Type),
+			"keys":         len(sec.Data),
+			"key_names":    keyNames,
+			"decoded_keys": decoded,
+		}},
+		"total": 1,
+	})
 }
 
 func (h *LateralHandler) ListServices(c *gin.Context) {
 	client, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -144,7 +165,7 @@ func (h *LateralHandler) ListServices(c *gin.Context) {
 func (h *LateralHandler) ListEndpoints(c *gin.Context) {
 	client, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -170,7 +191,7 @@ func (h *LateralHandler) ListEndpoints(c *gin.Context) {
 func (h *LateralHandler) ListNodes(c *gin.Context) {
 	client, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -200,7 +221,7 @@ func (h *LateralHandler) ListNodes(c *gin.Context) {
 func (h *LateralHandler) ListNetworkPolicies(c *gin.Context) {
 	client, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -224,7 +245,7 @@ func (h *LateralHandler) ListNetworkPolicies(c *gin.Context) {
 func (h *LateralHandler) ShowTaints(c *gin.Context) {
 	client, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)

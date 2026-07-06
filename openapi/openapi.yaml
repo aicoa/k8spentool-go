@@ -1226,6 +1226,21 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/AISessionSummaryResponse'
+    delete:
+      tags: [AI]
+      summary: Delete all AI sessions
+      responses:
+        '200':
+          description: All sessions deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  deleted:
+                    type: integer
 
   /ai/sessions/{id}:
     get:

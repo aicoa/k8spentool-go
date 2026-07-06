@@ -31,15 +31,49 @@ func BuildHTTPClient(skipVerify bool, timeoutSec int) *http.Client {
 	}
 }
 
+func applyAuthHeaders(req *http.Request, token, username, password string) {
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+		return
+	}
+	if username != "" || password != "" {
+		req.SetBasicAuth(username, password)
+	}
+}
+
 func SendRequest(url, method, token string, timeoutSec int, skipVerify bool) (int, []byte, error) {
-	req, err := http.NewRequest(method, url, nil)
+	return SendRequestWithAuth(url, method, token, "", "", timeoutSec, skipVerify)
+}
+
+func SendRequestWithAuth(url, method, token, username, password string, timeoutSec int, skipVerify bool) (int, []byte, error) {
+	return SendRequestWithBodyWithAuth(url, method, "", "", token, username, password, timeoutSec, skipVerify)
+}
+
+func newRequestWithAuth(method, url, requestBody, contentType, token, username, password string) (*http.Request, error) {
+	var reader io.Reader
+	if requestBody != "" {
+		reader = strings.NewReader(requestBody)
+	}
+
+	req, err := http.NewRequest(method, url, reader)
 	if err != nil {
-		return 0, nil, fmt.Errorf("create request failed: %w", err)
+		return nil, fmt.Errorf("create request failed: %w", err)
 	}
 	req.Header.Set("User-Agent", "K8sPenTool-ng/2.0")
 	req.Header.Set("Accept", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	} else if requestBody != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	applyAuthHeaders(req, token, username, password)
+	return req, nil
+}
+
+func SendRequestWithBodyWithAuth(url, method, requestBody, contentType, token, username, password string, timeoutSec int, skipVerify bool) (int, []byte, error) {
+	req, err := newRequestWithAuth(method, url, requestBody, contentType, token, username, password)
+	if err != nil {
+		return 0, nil, err
 	}
 
 	client := BuildHTTPClient(skipVerify, timeoutSec)
@@ -53,47 +87,22 @@ func SendRequest(url, method, token string, timeoutSec int, skipVerify bool) (in
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp.StatusCode, nil, fmt.Errorf("read body failed: %w", err)
-	}
-	return resp.StatusCode, body, nil
-}
-
-func SendPost(url, body, contentType, token string, timeoutSec int, skipVerify bool) (int, []byte, error) {
-	var reader io.Reader
-	if body != "" {
-		reader = strings.NewReader(body)
-	}
-
-	req, err := http.NewRequest("POST", url, reader)
-	if err != nil {
-		return 0, nil, fmt.Errorf("create request failed: %w", err)
-	}
-	req.Header.Set("User-Agent", "K8sPenTool-ng/2.0")
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	} else {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Accept", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	client := BuildHTTPClient(skipVerify, timeoutSec)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, nil, fmt.Errorf("connection failed: %w", err)
-	}
-	defer resp.Body.Close()
-
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return resp.StatusCode, nil, fmt.Errorf("read body failed: %w", err)
 	}
 	return resp.StatusCode, respBody, nil
+}
+
+func SendPost(url, body, contentType, token string, timeoutSec int, skipVerify bool) (int, []byte, error) {
+	return SendPostWithAuth(url, body, contentType, token, "", "", timeoutSec, skipVerify)
+}
+
+func SendPostWithAuth(url, body, contentType, token, username, password string, timeoutSec int, skipVerify bool) (int, []byte, error) {
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	return SendRequestWithBodyWithAuth(url, http.MethodPost, body, contentType, token, username, password, timeoutSec, skipVerify)
 }
 
 func IsPortOpen(host string, port int, timeoutSec int) bool {

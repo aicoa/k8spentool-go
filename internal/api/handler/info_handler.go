@@ -39,6 +39,8 @@ func (h *InfoHandler) RunProfile(c *gin.Context) {
 	var req struct {
 		TargetHost string `json:"target_host" binding:"required"`
 		Token      string `json:"token"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
 		TimeoutSec int    `json:"timeout_sec"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
@@ -55,6 +57,8 @@ func (h *InfoHandler) RunProfile(c *gin.Context) {
 		Host:       req.TargetHost,
 		Port:       6443,
 		Token:      req.Token,
+		Username:   req.Username,
+		Password:   req.Password,
 		SkipTLS:    req.SkipTLS,
 		TimeoutSec: req.TimeoutSec,
 	}

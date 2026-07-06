@@ -49,6 +49,8 @@ type TargetInfo struct {
 	Host        string            `json:"host"`
 	Port        int               `json:"port"`
 	Token       string            `json:"token,omitempty"`
+	Username    string            `json:"username,omitempty"`
+	Password    string            `json:"password,omitempty"`
 	SkipTLS     bool              `json:"skip_tls"`
 	TimeoutSec  int               `json:"timeout_sec"`
 	OpenPorts   []int             `json:"open_ports,omitempty"`

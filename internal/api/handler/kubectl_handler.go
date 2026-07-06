@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -52,9 +53,16 @@ type podInfo struct {
 	Namespace, Name, Status, Node, IP, Containers, Images string
 }
 
-func listPods(client *kubectl.Client, ns string) ([]podInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+var authCanIResourceSet = []string{
+	"pods", "secrets", "services", "deployments", "daemonsets", "statefulsets", "cronjobs",
+	"ingresses", "networkpolicies", "persistentvolumeclaims", "persistentvolumes",
+	"nodes", "serviceaccounts", "configmaps", "namespaces",
+	"roles", "rolebindings", "clusterroles", "clusterrolebindings",
+}
+
+var authCanIVerbs = []string{"get", "list", "create", "delete", "update", "patch"}
+
+func listPods(ctx context.Context, client *kubectl.Client, ns string) ([]podInfo, error) {
 	podList, err := client.ListPods(ctx, ns)
 	if err != nil {
 		return nil, err
@@ -91,7 +99,9 @@ func (h *KubectlHandler) GetPods(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	pods, err := listPods(client, "")
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.getTimeout(&req))
+	defer cancel()
+	pods, err := listPods(ctx, client, "")
 	c.JSON(http.StatusOK, gin.H{"pods": podListToJSON(pods), "total": len(pods), "error": errStr(err)})
 }
 
@@ -106,7 +116,7 @@ func (h *KubectlHandler) GetNodes(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.getTimeout(&req))
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.getTimeout(&req))
 	defer cancel()
 	nodeList, err := client.ListNodes(ctx)
 	if err != nil {
@@ -150,7 +160,7 @@ func (h *KubectlHandler) GetServices(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.getTimeout(&req))
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.getTimeout(&req))
 	defer cancel()
 	svcList, err := client.ListServices(ctx, "")
 	if err != nil {
@@ -190,7 +200,7 @@ func (h *KubectlHandler) GetSecrets(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.getTimeout(&req))
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.getTimeout(&req))
 	defer cancel()
 	secretList, err := client.ListSecrets(ctx, "")
 	if err != nil {
@@ -199,13 +209,14 @@ func (h *KubectlHandler) GetSecrets(c *gin.Context) {
 	}
 	secrets := make([]gin.H, 0, len(secretList.Items))
 	for _, s := range secretList.Items {
-		decoded := make(map[string]string)
-		for k, v := range s.Data {
-			decoded[k] = string(v) // 已 base64 解码（client-go 自动处理）
+		keyNames := make([]string, 0, len(s.Data))
+		for k := range s.Data {
+			keyNames = append(keyNames, k)
 		}
+		sort.Strings(keyNames)
 		secrets = append(secrets, gin.H{
 			"namespace": s.Namespace, "name": s.Name, "type": string(s.Type),
-			"keys": len(s.Data), "decoded_keys": decoded,
+			"keys": len(s.Data), "key_names": keyNames,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"secrets": secrets, "total": len(secrets)})
@@ -222,7 +233,7 @@ func (h *KubectlHandler) GetDeployments(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.getTimeout(&req))
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.getTimeout(&req))
 	defer cancel()
 	depList, err := client.Clientset.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -258,7 +269,7 @@ func (h *KubectlHandler) GetSA(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.getTimeout(&req))
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.getTimeout(&req))
 	defer cancel()
 	saList, err := client.ListServiceAccounts(ctx, "")
 	if err != nil {
@@ -287,7 +298,7 @@ func (h *KubectlHandler) GetCRB(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.getTimeout(&req))
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.getTimeout(&req))
 	defer cancel()
 	crbList, err := client.Clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -318,7 +329,9 @@ func (h *KubectlHandler) GetImages(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	pods, err := listPods(client, "")
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.getTimeout(&req))
+	defer cancel()
+	pods, err := listPods(ctx, client, "")
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -356,15 +369,13 @@ func (h *KubectlHandler) AuthCanI(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.getTimeout(&req))
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.getTimeout(&req))
 	defer cancel()
 
-	resources := []string{"pods", "secrets", "services", "deployments", "nodes", "serviceaccounts", "clusterrolebindings", "namespaces", "configmaps"}
-	verbs := []string{"get", "list", "create", "delete", "update", "patch"}
 	perms := make([]gin.H, 0)
-	for _, r := range resources {
+	for _, r := range authCanIResourceSet {
 		allowed := make([]string, 0)
-		for _, v := range verbs {
+		for _, v := range authCanIVerbs {
 			ok, _ := client.CheckSelfPermissions(ctx, "", v, r)
 			if ok {
 				allowed = append(allowed, v)
@@ -390,7 +401,7 @@ func (h *KubectlHandler) CustomCommand(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
 	args := parseCommandArgs(req.Command)
@@ -475,6 +486,75 @@ func routeCommand(ctx context.Context, client *kubectl.Client, args []string) (s
 				fmt.Fprintf(&sb, "%s/%s replicas=%d ready=%d %s\n", d.Namespace, d.Name, replicas, d.Status.ReadyReplicas, image)
 			}
 			return sb.String(), cmdStr
+		case "daemonsets", "daemonset", "ds":
+			if allNs {
+				ns = ""
+			}
+			list, err := client.Clientset.AppsV1().DaemonSets(ns).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			var sb strings.Builder
+			for _, ds := range list.Items {
+				fmt.Fprintf(&sb, "%s/%s desired=%d ready=%d\n", ds.Namespace, ds.Name, ds.Status.DesiredNumberScheduled, ds.Status.NumberReady)
+			}
+			return sb.String(), cmdStr
+		case "statefulsets", "statefulset", "sts":
+			if allNs {
+				ns = ""
+			}
+			list, err := client.Clientset.AppsV1().StatefulSets(ns).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			var sb strings.Builder
+			for _, sts := range list.Items {
+				replicas := int32(0)
+				if sts.Spec.Replicas != nil {
+					replicas = *sts.Spec.Replicas
+				}
+				fmt.Fprintf(&sb, "%s/%s replicas=%d ready=%d\n", sts.Namespace, sts.Name, replicas, sts.Status.ReadyReplicas)
+			}
+			return sb.String(), cmdStr
+		case "cronjobs", "cronjob", "cj":
+			if allNs {
+				ns = ""
+			}
+			list, err := client.Clientset.BatchV1().CronJobs(ns).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			var sb strings.Builder
+			for _, cj := range list.Items {
+				fmt.Fprintf(&sb, "%s/%s schedule=%s suspend=%v\n", cj.Namespace, cj.Name, cj.Spec.Schedule, valueOrFalse(cj.Spec.Suspend))
+			}
+			return sb.String(), cmdStr
+		case "ingresses", "ingress", "ing":
+			if allNs {
+				ns = ""
+			}
+			list, err := client.Clientset.NetworkingV1().Ingresses(ns).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			var sb strings.Builder
+			for _, ing := range list.Items {
+				fmt.Fprintf(&sb, "%s/%s rules=%d\n", ing.Namespace, ing.Name, len(ing.Spec.Rules))
+			}
+			return sb.String(), cmdStr
+		case "networkpolicies", "networkpolicy", "netpol":
+			if allNs {
+				ns = ""
+			}
+			list, err := client.Clientset.NetworkingV1().NetworkPolicies(ns).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			var sb strings.Builder
+			for _, netpol := range list.Items {
+				fmt.Fprintf(&sb, "%s/%s ingress=%d egress=%d\n", netpol.Namespace, netpol.Name, len(netpol.Spec.Ingress), len(netpol.Spec.Egress))
+			}
+			return sb.String(), cmdStr
 		case "serviceaccounts", "serviceaccount", "sa":
 			if allNs {
 				ns = ""
@@ -492,8 +572,62 @@ func routeCommand(ctx context.Context, client *kubectl.Client, args []string) (s
 				fmt.Fprintf(&sb, "%s/%s secrets=%v\n", sa.Namespace, sa.Name, secrets)
 			}
 			return sb.String(), cmdStr
+		case "clusterrolebindings", "clusterrolebinding", "crb":
+			list, err := client.Clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			var sb strings.Builder
+			for _, crb := range list.Items {
+				subjects := make([]string, 0, len(crb.Subjects))
+				for _, subject := range crb.Subjects {
+					subjects = append(subjects, subject.Kind+":"+subject.Name)
+				}
+				fmt.Fprintf(&sb, "%s role=%s subjects=%v\n", crb.Name, crb.RoleRef.Name, subjects)
+			}
+			return sb.String(), cmdStr
+		case "configmaps", "configmap", "cm":
+			if allNs {
+				ns = ""
+			}
+			list, err := client.Clientset.CoreV1().ConfigMaps(ns).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			var sb strings.Builder
+			for _, cm := range list.Items {
+				fmt.Fprintf(&sb, "%s/%s keys=%d\n", cm.Namespace, cm.Name, len(cm.Data)+len(cm.BinaryData))
+			}
+			return sb.String(), cmdStr
+		case "persistentvolumeclaims", "persistentvolumeclaim", "pvc":
+			if allNs {
+				ns = ""
+			}
+			list, err := client.Clientset.CoreV1().PersistentVolumeClaims(ns).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			var sb strings.Builder
+			for _, pvc := range list.Items {
+				fmt.Fprintf(&sb, "%s/%s status=%s volume=%s\n", pvc.Namespace, pvc.Name, pvc.Status.Phase, pvc.Spec.VolumeName)
+			}
+			return sb.String(), cmdStr
+		case "persistentvolumes", "persistentvolume", "pv":
+			list, err := client.Clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "Error: " + err.Error(), cmdStr
+			}
+			var sb strings.Builder
+			for _, pv := range list.Items {
+				claim := "-"
+				if pv.Spec.ClaimRef != nil {
+					claim = pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
+				}
+				fmt.Fprintf(&sb, "%s status=%s claim=%s\n", pv.Name, pv.Status.Phase, claim)
+			}
+			return sb.String(), cmdStr
 		default:
-			return "Unsupported resource: " + resource + " (supported: pods/nodes/services/secrets/deployments/sa/namespaces). Use the dedicated buttons for structured output.", cmdStr
+			return "Unsupported resource: " + resource + " (supported: pods/nodes/services/secrets/deployments/daemonsets/statefulsets/cronjobs/ingresses/networkpolicies/pvc/pv/sa/namespaces/configmaps/crb). Use the dedicated buttons for structured output.", cmdStr
 		}
 	case "cluster-info":
 		v, err := client.ServerVersion()
@@ -503,18 +637,61 @@ func routeCommand(ctx context.Context, client *kubectl.Client, args []string) (s
 		return "Kubernetes " + v, cmdStr
 	case "auth":
 		if len(args) >= 2 && args[1] == "can-i" {
-			ok, err := client.CheckSelfPermissions(ctx, "", "*", "*")
+			if len(args) >= 3 && args[2] == "--list" {
+				return formatCanIList(ctx, client), cmdStr
+			}
+
+			ns, _ := parseNS(args[2:])
+			filtered := make([]string, 0, len(args)-2)
+			skipNext := false
+			for _, arg := range args[2:] {
+				if skipNext {
+					skipNext = false
+					continue
+				}
+				if arg == "-n" || arg == "--namespace" {
+					skipNext = true
+					continue
+				}
+				if arg == "-A" || arg == "--all-namespaces" {
+					continue
+				}
+				filtered = append(filtered, arg)
+			}
+
+			if len(filtered) == 0 {
+				ok, err := client.CheckSelfPermissions(ctx, "", "*", "*")
+				if err != nil {
+					return "Error: " + err.Error(), cmdStr
+				}
+				if ok {
+					return "can-i *:* = yes (cluster-admin)", cmdStr
+				}
+				return "can-i *:* = no", cmdStr
+			}
+
+			verb := filtered[0]
+			resource := "*"
+			if len(filtered) >= 2 {
+				resource = filtered[1]
+			}
+			effectiveNS := authCanINamespaceForResource(ns, resource)
+			ok, err := client.CheckSelfPermissions(ctx, effectiveNS, verb, resource)
 			if err != nil {
 				return "Error: " + err.Error(), cmdStr
 			}
-			if ok {
-				return "can-i *:* = yes (cluster-admin)", cmdStr
+			scope := resource
+			if effectiveNS != "" && resource != "*" {
+				scope += " in namespace " + effectiveNS
 			}
-			return "can-i *:* = no", cmdStr
+			if ok {
+				return fmt.Sprintf("yes: can %s %s", verb, scope), cmdStr
+			}
+			return fmt.Sprintf("no: cannot %s %s", verb, scope), cmdStr
 		}
 		return "Only 'auth can-i' is supported via client-go. Use Auth Can-I button for full RBAC check.", cmdStr
 	default:
-		return fmt.Sprintf("Cross-platform mode: kubectl binary not required. '%s' is not supported via client-go. Use the dedicated UI buttons for:\n  get pods/nodes/services/secrets/deployments/sa/namespaces\n  cluster-info\n  auth can-i", verb), cmdStr
+		return fmt.Sprintf("Cross-platform mode: kubectl binary not required. '%s' is not supported via client-go. Use the dedicated UI buttons for:\n  get pods/nodes/services/secrets/deployments/daemonsets/statefulsets/ingresses/networkpolicies/pvc/pv/sa/namespaces\n  cluster-info\n  auth can-i", verb), cmdStr
 	}
 }
 
@@ -528,6 +705,31 @@ func parseNS(args []string) (string, bool) {
 		}
 	}
 	return "default", false
+}
+
+func formatCanIList(ctx context.Context, client *kubectl.Client) string {
+	var sb strings.Builder
+	for _, resource := range authCanIResourceSet {
+		allowed := make([]string, 0)
+		for _, verb := range authCanIVerbs {
+			ok, _ := client.CheckSelfPermissions(ctx, "", verb, resource)
+			if ok {
+				allowed = append(allowed, verb)
+			}
+		}
+		fmt.Fprintf(&sb, "%s: %s\n", resource, strings.Join(allowed, ", "))
+	}
+	if ok, err := client.CheckSelfPermissions(ctx, "", "*", "*"); err == nil {
+		fmt.Fprintf(&sb, "cluster-admin: %v\n", ok)
+	}
+	return sb.String()
+}
+
+func authCanINamespaceForResource(namespace, resource string) string {
+	if isClusterScopedResourceAlias(resource) {
+		return ""
+	}
+	return namespace
 }
 
 func formatPodTable(list *corev1.PodList) string {
@@ -594,7 +796,7 @@ func (h *KubectlHandler) Apply(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 	output, err := client.ApplyYAML(ctx, req.YAML)
 	if err != nil {
@@ -625,7 +827,7 @@ func (h *KubectlHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 	if strings.TrimSpace(req.YAML) != "" {
 		output, err := client.DeleteYAML(ctx, req.YAML)
@@ -636,7 +838,7 @@ func (h *KubectlHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"output": output, "command": "kubectl delete -f <yaml> (via client-go)"})
 		return
 	}
-	if req.Namespace == "" {
+	if req.Namespace == "" && !isClusterScopedResourceAlias(req.Resource) {
 		req.Namespace = "default"
 	}
 	err = client.DeleteResource(ctx, req.Resource, req.Name, req.Namespace)
@@ -644,7 +846,40 @@ func (h *KubectlHandler) Delete(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"output": fmt.Sprintf("deleted %s/%s in %s", req.Resource, req.Name, req.Namespace), "command": fmt.Sprintf("kubectl delete %s %s -n %s", req.Resource, req.Name, req.Namespace)})
+	c.JSON(http.StatusOK, gin.H{
+		"output":  formatDeleteMessage(req.Resource, req.Name, req.Namespace),
+		"command": formatDeleteCommand(req.Resource, req.Name, req.Namespace),
+	})
+}
+
+func isClusterScopedResourceAlias(resource string) bool {
+	switch strings.ToLower(strings.TrimSpace(resource)) {
+	case "namespace", "namespaces", "ns", "clusterrole", "clusterroles", "cr", "clusterrolebinding", "clusterrolebindings", "crb":
+		return true
+	default:
+		return false
+	}
+}
+
+func formatDeleteMessage(resource, name, namespace string) string {
+	if namespace == "" {
+		return fmt.Sprintf("deleted %s/%s", resource, name)
+	}
+	return fmt.Sprintf("deleted %s/%s in %s", resource, name, namespace)
+}
+
+func formatDeleteCommand(resource, name, namespace string) string {
+	if namespace == "" {
+		return fmt.Sprintf("kubectl delete %s %s", resource, name)
+	}
+	return fmt.Sprintf("kubectl delete %s %s -n %s", resource, name, namespace)
+}
+
+func valueOrFalse(value *bool) bool {
+	if value == nil {
+		return false
+	}
+	return *value
 }
 
 func parseCommandArgs(cmd string) []string {

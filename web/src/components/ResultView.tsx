@@ -56,6 +56,7 @@ const columnSchemas: Record<string, Col[]> = {
     { title: 'Name', dataIndex: 'name', key: 'name' },
     { title: 'Type', dataIndex: 'type', key: 'type', width: 200 },
     { title: 'Keys', dataIndex: 'keys', key: 'keys', width: 70 },
+    { title: 'Key Names', dataIndex: 'key_names', key: 'key_names', render: (v: any[]) => (v || []).join(', ') || '-' },
     { title: 'Decoded', dataIndex: 'decoded_keys', key: 'decoded_keys',
       render: (v: any) => {
         if (!v || typeof v !== 'object') return '-';
@@ -404,12 +405,20 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
       );
     }
     // 无法解析为表格 → 落回纯文本 pre
+    const contextNotes = buildContextNotes(result);
     return (
       <div>
         {errorBanner}
         {result.command && <Text code style={{ fontSize: 10 }}>{String(result.command)}</Text>}
         {result._exit_hint && (
           <Tag color="orange" style={{ fontSize: 10, marginBottom: 4 }}>{result._exit_hint}</Tag>
+        )}
+        {contextNotes.length > 0 && (
+          <div style={{ marginTop: 6, marginBottom: 6 }}>
+            {contextNotes.map((note, index) => (
+              <div key={index} style={{ fontSize: 11, color: '#666', marginBottom: 4 }}>{note}</div>
+            ))}
+          </div>
         )}
         <div style={{ position: 'relative' }}><CopyBtn text={textVal} /><pre style={preStyle}>{textVal}</pre></div>
       </div>
@@ -420,9 +429,17 @@ export default function ResultView({ result, emptyHint, loading }: { result: any
 
   // 兜底：折叠 JSON
   const jsonStr = JSON.stringify(result, null, 2);
+  const contextNotes = buildContextNotes(result);
   return (
     <div>
       {errorBanner}
+      {contextNotes.length > 0 && (
+        <div style={{ marginTop: 6, marginBottom: 6 }}>
+          {contextNotes.map((note, index) => (
+            <div key={index} style={{ fontSize: 11, color: '#666', marginBottom: 4 }}>{note}</div>
+          ))}
+        </div>
+      )}
       <div style={{ position: 'relative' }}><CopyBtn text={jsonStr} /><pre style={preStyle}>{jsonStr}</pre></div>
     </div>
   );
@@ -536,6 +553,18 @@ function inferColumns(rows: any[]): Col[] {
 function buildContextNotes(result: any): string[] {
   if (!result || typeof result !== 'object') return [];
   const notes: string[] = [];
+  if (typeof result.status_code === 'number') {
+    notes.push(`HTTP 状态: ${result.status_code}`);
+  }
+  if (typeof result.reachable === 'boolean') {
+    notes.push(`连通性: ${result.reachable ? '可达' : '不可达'}`);
+  }
+  if (typeof result.accessible === 'boolean') {
+    notes.push(`访问结果: ${result.accessible ? '已通过当前认证访问' : '当前认证未通过 / 被拒绝'}`);
+  }
+  if (typeof result.authenticated === 'boolean') {
+    notes.push(`鉴权方式: ${result.authenticated ? '携带认证信息' : '未携带认证信息'}`);
+  }
   const looksLikeDashboardDiscovery =
     typeof result.found === 'boolean'
     || Array.isArray(result.services)

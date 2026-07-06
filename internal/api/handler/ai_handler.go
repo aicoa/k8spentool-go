@@ -424,6 +424,110 @@ type toolLoopOutcome struct {
 	PendingActions []PendingToolAction
 }
 
+func normalizeToolCallForSession(call ai.ToolCall, uiContext *AISessionUIContext) ai.ToolCall {
+	if uiContext == nil {
+		return call
+	}
+
+	args := map[string]interface{}{}
+	trimmed := strings.TrimSpace(call.Function.Arguments)
+	if trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &args); err != nil {
+			return call
+		}
+	}
+
+	switch call.Function.Name {
+	case "exec_command", "escape_privileged":
+		if selectedPod := uiContext.SelectedPod; selectedPod != nil && strings.TrimSpace(selectedPod.Name) != "" {
+			applySelectedPodDefaults(args, selectedPod)
+		}
+	case "lateral_view_secret":
+		normalizeSecretReference(args)
+	default:
+		return call
+	}
+
+	body, err := json.Marshal(args)
+	if err != nil {
+		return call
+	}
+
+	call.Function.Arguments = string(body)
+	return call
+}
+
+func applySelectedPodDefaults(args map[string]interface{}, selectedPod *AISessionPodContext) {
+	podName := strings.TrimSpace(readStringArg(args, "pod_name"))
+	namespace := strings.TrimSpace(readStringArg(args, "namespace"))
+	container := strings.TrimSpace(readStringArg(args, "container_name"))
+
+	if podName == "" {
+		podName = selectedPod.Name
+	}
+	if strings.Count(podName, "/") == 1 {
+		parts := strings.SplitN(podName, "/", 2)
+		if namespace == "" {
+			namespace = strings.TrimSpace(parts[0])
+		}
+		podName = strings.TrimSpace(parts[1])
+	}
+	if namespace == "" {
+		namespace = strings.TrimSpace(selectedPod.Namespace)
+	}
+	if container == "" {
+		container = strings.TrimSpace(selectedPod.Container)
+	}
+
+	if namespace != "" {
+		args["namespace"] = namespace
+	}
+	if podName != "" {
+		args["pod_name"] = podName
+	}
+	if container != "" {
+		args["container_name"] = container
+	}
+}
+
+func normalizeSecretReference(args map[string]interface{}) {
+	secretName := strings.TrimSpace(readStringArg(args, "secret_name"))
+	namespace := strings.TrimSpace(readStringArg(args, "namespace"))
+
+	if strings.Count(secretName, "/") == 1 {
+		parts := strings.SplitN(secretName, "/", 2)
+		if namespace == "" {
+			namespace = strings.TrimSpace(parts[0])
+		}
+		secretName = strings.TrimSpace(parts[1])
+	}
+	if strings.Count(namespace, "/") == 1 && secretName == "" {
+		parts := strings.SplitN(namespace, "/", 2)
+		namespace = strings.TrimSpace(parts[0])
+		secretName = strings.TrimSpace(parts[1])
+	}
+
+	if namespace != "" {
+		args["namespace"] = namespace
+	}
+	if secretName != "" {
+		args["secret_name"] = secretName
+	}
+}
+
+func readStringArg(args map[string]interface{}, key string) string {
+	value, ok := args[key]
+	if !ok {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
 // runToolLoop 执行 ReAct 循环，最多 maxRounds 轮。
 func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools []ai.ToolDefinition, llm aiChatClient) (*toolLoopOutcome, error) {
 	const maxRounds = 10
@@ -531,38 +635,39 @@ func (h *AIHandler) runToolLoop(ctx context.Context, session *AISession, tools [
 
 		// 逐个执行工具，结果以 tool 角色回灌
 		for _, tc := range choice.Message.ToolCalls {
+			normalizedCall := normalizeToolCallForSession(tc, session.UIContext)
 			// 安全闸门：使用工具的实际风险级别，而非硬编码 RiskHigh
-			riskLevel := ai.GetToolRiskLevel(tc.Function.Name)
-			guard := safety.CheckAction(tc.Function.Name, tc.Function.Arguments, riskLevel)
+			riskLevel := ai.GetToolRiskLevel(normalizedCall.Function.Name)
+			guard := safety.CheckAction(normalizedCall.Function.Name, normalizedCall.Function.Arguments, riskLevel)
 			var res ai.DispatchResult
 			if guard.NeedApproval {
 				res = ai.DispatchResult{
 					Output: "需人工批准",
-					Trace:  ai.ToolTrace{Tool: tc.Function.Name, Args: tc.Function.Arguments, ResultPreview: "需人工批准", Status: "needs_approval"},
+					Trace:  ai.ToolTrace{Tool: normalizedCall.Function.Name, Args: normalizedCall.Function.Arguments, ResultPreview: "需人工批准", Status: "needs_approval"},
 				}
 				pendingActions = append(pendingActions, PendingToolAction{
 					ID:               uuid.New().String(),
-					ToolCall:         tc,
+					ToolCall:         normalizedCall,
 					AssistantContent: choice.Message.Content,
 					Status:           "pending",
 					CreatedAt:        time.Now(),
 				})
 			} else {
-				res = ai.Dispatch(ctx, tc, session.Auth)
+				res = ai.Dispatch(ctx, normalizedCall, session.Auth)
 				messages = append(messages, ai.Message{
 					Role:       "tool",
-					ToolCallID: tc.ID,
+					ToolCallID: normalizedCall.ID,
 					Content:    res.Output,
 				})
 				historyEntries = append(historyEntries, AIHistoryEntry{
 					Role:       "tool",
 					Content:    res.Output,
-					ToolCallID: tc.ID,
+					ToolCallID: normalizedCall.ID,
 					Timestamp:  time.Now(),
 				})
 			}
 			traces = append(traces, res.Trace)
-			log.Printf("[AI] tool %s status=%s risk=%s", tc.Function.Name, res.Trace.Status, riskLevel)
+			log.Printf("[AI] tool %s status=%s risk=%s", normalizedCall.Function.Name, res.Trace.Status, riskLevel)
 		}
 
 		if len(pendingActions) > 0 {
@@ -706,6 +811,7 @@ func (h *AIHandler) GeneratePlan(c *gin.Context) {
 	session.Plan = plan
 	session.Status = "planning"
 	session.mu.Unlock()
+	h.saveSession(session)
 
 	c.JSON(http.StatusOK, plan)
 }
@@ -800,6 +906,25 @@ func (h *AIHandler) DeleteSession(c *gin.Context) {
 	h.mu.Unlock()
 	h.deleteSessionFile(id)
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+func (h *AIHandler) DeleteAllSessions(c *gin.Context) {
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.sessions))
+	for id := range h.sessions {
+		ids = append(ids, id)
+	}
+	h.sessions = make(map[string]*AISession)
+	h.mu.Unlock()
+
+	for _, id := range ids {
+		h.deleteSessionFile(id)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "deleted",
+		"deleted": len(ids),
+	})
 }
 
 // buildLLMMessages converts session history to LLM messages, preserving tool call context.
@@ -922,29 +1047,64 @@ func (h *AIHandler) hydrateSessionAuth(session *AISession) bool {
 	session.mu.Lock()
 	defer session.mu.Unlock()
 
-	if authHasHost(session.Auth) {
-		return true
+	if session.Auth == nil {
+		session.Auth = &ai.AuthCreds{}
 	}
-	if auth := authFromTarget(session.Target); auth != nil {
-		session.Auth = auth
-		return true
-	}
+	mergeAuthFromTarget(session.Auth, session.Target)
 	if h.targetStore != nil && session.TargetID != "" {
 		if state, ok := h.targetStore.GetSession(session.TargetID); ok && state != nil && state.Target != nil {
 			if session.Target == nil {
 				session.Target = cloneTarget(state.Target)
 			}
-			if auth := authFromTarget(state.Target); auth != nil {
-				session.Auth = auth
-				return true
-			}
+			mergeAuthFromTarget(session.Auth, state.Target)
 		}
 	}
-	return false
+	return authCanResume(session.Auth, session.Target)
 }
 
 func authHasHost(auth *ai.AuthCreds) bool {
 	return auth != nil && strings.TrimSpace(auth.Host) != ""
+}
+
+func mergeAuthFromTarget(auth *ai.AuthCreds, target *engine.Target) {
+	if auth == nil || target == nil {
+		return
+	}
+	if strings.TrimSpace(auth.Host) == "" {
+		auth.Host = target.Host
+	}
+	if auth.Token == "" {
+		auth.Token = target.Token
+	}
+	if auth.Username == "" {
+		auth.Username = target.Username
+	}
+	if auth.Password == "" {
+		auth.Password = target.Password
+	}
+	if auth.TimeoutSec <= 0 {
+		auth.TimeoutSec = target.TimeoutSec
+	}
+	if !auth.SkipTLS {
+		auth.SkipTLS = target.SkipTLS
+	}
+}
+
+func authCanResume(auth *ai.AuthCreds, target *engine.Target) bool {
+	if !authHasHost(auth) {
+		return false
+	}
+	if target == nil {
+		return true
+	}
+	switch target.AuthType {
+	case engine.AuthToken:
+		return strings.TrimSpace(auth.Token) != ""
+	case engine.AuthUserPass:
+		return strings.TrimSpace(auth.Username) != "" || strings.TrimSpace(auth.Password) != ""
+	default:
+		return true
+	}
 }
 
 func normalizeSessionStatus(session *AISession) string {
@@ -1012,7 +1172,7 @@ func (h *AIHandler) sessionSummaryResponse(session *AISession) aiSessionSummaryR
 		Status:         session.Status,
 		PendingActions: append([]PendingToolAction(nil), session.PendingActions...),
 		CreatedAt:      session.CreatedAt,
-		CanResumeChat:  authHasHost(session.Auth),
+		CanResumeChat:  authCanResume(session.Auth, session.Target),
 	}
 }
 
@@ -1030,7 +1190,7 @@ func (h *AIHandler) sessionDetailResponse(session *AISession) aiSessionDetailRes
 		History:        append([]AIHistoryEntry(nil), session.History...),
 		PendingActions: append([]PendingToolAction(nil), session.PendingActions...),
 		CreatedAt:      session.CreatedAt,
-		CanResumeChat:  authHasHost(session.Auth),
+		CanResumeChat:  authCanResume(session.Auth, session.Target),
 	}
 }
 
@@ -1182,16 +1342,17 @@ func (h *AIHandler) approvePendingAction(c *gin.Context, session *AISession, act
 		return
 	}
 	session.PendingActions = append(session.PendingActions[:idx], session.PendingActions[idx+1:]...)
-	res := ai.Dispatch(c.Request.Context(), action.ToolCall, session.Auth)
+	normalizedCall := normalizeToolCallForSession(action.ToolCall, session.UIContext)
+	res := ai.Dispatch(c.Request.Context(), normalizedCall, session.Auth)
 	session.Messages = append(session.Messages, ai.Message{
 		Role:       "tool",
-		ToolCallID: action.ToolCall.ID,
+		ToolCallID: normalizedCall.ID,
 		Content:    res.Output,
 	})
 	toolEntry := AIHistoryEntry{
 		Role:            "tool",
 		Content:         res.Output,
-		ToolCallID:      action.ToolCall.ID,
+		ToolCallID:      normalizedCall.ID,
 		PendingActionID: action.ID,
 		Timestamp:       time.Now(),
 	}

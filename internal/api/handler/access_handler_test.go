@@ -1,6 +1,8 @@
 package handler
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestParseKubeconfigContent(t *testing.T) {
 	content := `
@@ -43,5 +45,55 @@ users:
 	}
 	if len(parsed.TokensFound) != 1 || parsed.TokensFound[0] != "demo-token" {
 		t.Fatalf("expected token to be parsed, got %#v", parsed.TokensFound)
+	}
+}
+
+func TestTryParseItemsSecretListOnlyReturnsKeyNames(t *testing.T) {
+	body := []byte(`{
+		"kind":"SecretList",
+		"items":[
+			{
+				"metadata":{"name":"demo-secret","namespace":"default"},
+				"type":"Opaque",
+				"data":{"username":"YWRtaW4=","password":"YWRtaW4="}
+			}
+		]
+	}`)
+
+	key, items := tryParseItems(body)
+	if key != "secrets" {
+		t.Fatalf("expected schema key secrets, got %q", key)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one parsed item, got %d", len(items))
+	}
+	if got := items[0]["decoded_keys"]; got != nil {
+		t.Fatalf("expected decoded_keys to be omitted, got %#v", got)
+	}
+	gotNames, ok := items[0]["key_names"].([]string)
+	if !ok {
+		t.Fatalf("expected key_names []string, got %#v", items[0]["key_names"])
+	}
+	if len(gotNames) != 2 || gotNames[0] != "password" || gotNames[1] != "username" {
+		t.Fatalf("unexpected key_names %#v", gotNames)
+	}
+}
+
+func TestBuildAPIServerURL(t *testing.T) {
+	cases := []struct {
+		name   string
+		host   string
+		path   string
+		expect string
+	}{
+		{name: "plain host", host: "demo.local", path: "/api/v1/namespaces", expect: "https://demo.local:6443/api/v1/namespaces"},
+		{name: "https custom port", host: "https://demo.local:9443", path: "/api/v1/pods", expect: "https://demo.local:9443/api/v1/pods"},
+		{name: "path without leading slash", host: "demo.local:8443", path: "apis/apps/v1/deployments", expect: "https://demo.local:8443/apis/apps/v1/deployments"},
+	}
+
+	for _, tc := range cases {
+		if got := buildAPIServerURL(tc.host, tc.path); got != tc.expect {
+			t.Fatalf("%s: buildAPIServerURL(%q, %q) = %q, want %q", tc.name, tc.host, tc.path, got, tc.expect)
+		}
 	}
 }

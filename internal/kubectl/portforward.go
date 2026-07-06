@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 )
@@ -66,7 +66,8 @@ func (c *Client) PortForward(ctx context.Context, namespace, podName string, loc
 // namespace + podName: target pod
 // Returns a stop function to close the tunnel
 func (c *Client) ForwardPodPort(namespace, podName string, localPort, podPort int) (func(), error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	stopCh, err := c.PortForward(ctx, namespace, podName, localPort, podPort)
 	if err != nil {
 		return nil, err
@@ -86,17 +87,13 @@ func GetPodForwardURL(podName, namespace string, podPort int) string {
 
 // BuildSPDYURL returns the raw SPDY websocket URL for port-forwarding (for debugging)
 func (c *Client) BuildSPDYURL(namespace, podName string) (*url.URL, error) {
-	req := c.Clientset.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(podName).
-		Namespace(namespace).
-		SubResource("exec").
-		VersionedParams(&corev1.PodExecOptions{
-			Command: []string{"/bin/sh"},
-			Stdin:   true,
-			Stdout:  true,
-			TTY:     true,
-		}, nil)
-
-	return req.URL(), nil
+	if c == nil || c.config == nil || strings.TrimSpace(c.config.Host) == "" {
+		return nil, fmt.Errorf("client config host is empty")
+	}
+	base, err := url.Parse(c.config.Host)
+	if err != nil {
+		return nil, fmt.Errorf("parse client host: %w", err)
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", namespace, podName)
+	return base, nil
 }

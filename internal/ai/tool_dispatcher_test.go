@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -62,5 +63,51 @@ func TestDispatchRejectsLoopbackOverrideForSelectedTarget(t *testing.T) {
 	}
 	if got, _ := data["valid_for_selected_target"].(bool); got {
 		t.Fatalf("expected loopback override to be invalid for selected target")
+	}
+}
+
+func TestDispatchExecCommandRequiresPodName(t *testing.T) {
+	call := ToolCall{
+		ID:   "call_3",
+		Type: "function",
+		Function: FunctionCallArg{
+			Name:      "exec_command",
+			Arguments: `{"namespace":"default","command":"id"}`,
+		},
+	}
+
+	result := Dispatch(context.Background(), call, &AuthCreds{})
+	var payload ToolResultPayload
+	if err := json.Unmarshal([]byte(result.Output), &payload); err != nil {
+		t.Fatalf("expected structured JSON output, got error: %v", err)
+	}
+	if payload.Status != "error" {
+		t.Fatalf("expected error status for missing pod_name, got %q", payload.Status)
+	}
+	if !strings.Contains(payload.Summary, "pod_name is required") {
+		t.Fatalf("expected pod_name guidance, got %q", payload.Summary)
+	}
+}
+
+func TestDispatchLateralViewSecretRejectsMissingSecretName(t *testing.T) {
+	call := ToolCall{
+		ID:   "call_4",
+		Type: "function",
+		Function: FunctionCallArg{
+			Name:      "lateral_view_secret",
+			Arguments: `{"namespace":"kube-system"}`,
+		},
+	}
+
+	result := Dispatch(context.Background(), call, &AuthCreds{})
+	var payload ToolResultPayload
+	if err := json.Unmarshal([]byte(result.Output), &payload); err != nil {
+		t.Fatalf("expected structured JSON output, got error: %v", err)
+	}
+	if payload.Status != "error" {
+		t.Fatalf("expected error status for missing secret_name, got %q", payload.Status)
+	}
+	if !strings.Contains(payload.Summary, "secret_name is required") {
+		t.Fatalf("expected secret_name guidance, got %q", payload.Summary)
 	}
 }

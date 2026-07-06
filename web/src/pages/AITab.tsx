@@ -54,14 +54,24 @@ function buildMessagesFromSessionPayload(payload: any, fallbackTargetLabel?: str
     : [];
   if (messageEntries.length > 0) return messageEntries;
   const targetLabel = payload?.target?.host || payload?.target_id || fallbackTargetLabel || 'current target';
+  const stopped = payload?.status === 'stopped';
+  const resumable = payload?.can_resume_chat !== false && !stopped;
+  const content = stopped
+    ? `Session opened for target ${targetLabel}. This historical session has no saved chat transcript and is already stopped, so it can only be viewed in read-only mode.`
+    : !resumable
+      ? `Session opened for target ${targetLabel}. This historical session has no saved chat transcript and cannot resume automated actions because its auth context is incomplete.`
+      : `Session opened for target ${targetLabel}. This session does not have saved chat history yet, so you can continue from the current target context directly.`;
   return [{
     role: 'assistant',
-    content: `Session opened for target ${targetLabel}. This session does not have saved chat history yet, so you can continue from the current target context directly.`,
+    content,
   }];
 }
 
 export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods, sharedPodSource, sharedPodSelection }: Props) {
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionStatus, setSessionStatus] = useState<string>('');
+  const [sessionUIContext, setSessionUIContext] = useState<AISessionUIContext | null>(null);
+  const [activeSessionTargetLabel, setActiveSessionTargetLabel] = useState('');
   const [messages, setMessages] = useState<Array<{ role: string; content: string; traces?: any[] }>>([]);
   const [pendingActions, setPendingActions] = useState<any[]>([]);
   const [sessions, setSessions] = useState<AISessionSummary[]>([]);
@@ -92,6 +102,13 @@ export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods,
 
     loadSessions();
   }, []);
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(sessions.length / sessionPageSize));
+    if (sessionPage > maxPage) {
+      setSessionPage(maxPage);
+    }
+  }, [sessionPage, sessionPageSize, sessions.length]);
 
   const loadSessions = async () => {
     setSessionLoading(true);
@@ -144,26 +161,43 @@ export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods,
   };
 
   const auth = getAuth();
+  const hasTargetContext = Boolean(activeTarget || auth.host?.trim());
   const sharedPodSourceLabel = sharedPodSource === 'kubelet' ? 'Kubelet' : sharedPodSource === 'kubectl' ? 'kubectl' : 'API Server';
   const currentUIContext: AISessionUIContext | undefined = sharedPodSelection || sharedPods.length > 0 ? {
     selected_pod: sharedPodSelection || undefined,
     shared_pod_source: sharedPodSource || undefined,
     shared_pod_count: sharedPods.length || undefined,
   } : undefined;
+  const visibleSessionContext = sessionId ? sessionUIContext : currentUIContext;
+  const visibleSelectedPod = visibleSessionContext?.selected_pod;
+  const visiblePodCount = visibleSessionContext?.shared_pod_count || 0;
+  const visiblePodSource = visibleSessionContext?.shared_pod_source;
+  const visiblePodSourceLabel = visiblePodSource === 'kubelet' ? 'Kubelet' : visiblePodSource === 'kubectl' ? 'kubectl' : visiblePodSource === 'api-server' ? 'API Server' : '';
 
   const createSession = async () => {
+    if (!hasTargetContext) {
+      message.warning('请先选择或输入一个目标，再创建 AI session。');
+      return;
+    }
     try {
       const targetId = activeTarget || host || 'default';
       const r = await api.ai.createSession(targetId, auth, currentUIContext);
       setSessionId(r.id);
+      setSessionStatus(r.status || 'active');
+      setSessionPage(1);
       setCanResumeChat(true);
       setChatDisabledReason('');
+      setSessionUIContext(currentUIContext || null);
+      setActiveSessionTargetLabel(auth.host || targetId);
       setPendingActions(r.pending_actions || []);
       setPlan(r.plan || null);
       setMessages(buildMessagesFromSessionPayload(r, auth.host || targetId));
       addLog('[AI] Session created: ' + r.id);
       loadSessions();
-    } catch (e) { addLog('[AI] Failed to create session: ' + e); }
+    } catch (e) {
+      addLog('[AI] Failed to create session: ' + e);
+      message.error('创建 AI session 失败: ' + e);
+    }
   };
 
   const selectSession = async (id: string) => {
@@ -178,7 +212,10 @@ export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods,
       const restoredMessages = historyToMessages(r.history);
       const stopped = r.status === 'stopped';
       const resumable = r.can_resume_chat !== false && !stopped;
+      setSessionStatus(r.status || '');
       setCanResumeChat(resumable);
+      setSessionUIContext(r.ui_context || null);
+      setActiveSessionTargetLabel(sessionTargetLabel(r));
       setChatDisabledReason(
         stopped
           ? '当前会话已停止，不能继续自动执行。请新建会话。'
@@ -202,8 +239,11 @@ export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods,
 
   const closeSession = () => {
     setSessionId(null);
+    setSessionStatus('');
     setCanResumeChat(true);
     setChatDisabledReason('');
+    setSessionUIContext(null);
+    setActiveSessionTargetLabel('');
     setMessages([]);
     setPendingActions([]);
     setPlan(null);
@@ -216,6 +256,7 @@ export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods,
     try {
       const r = await api.ai.stop(sessionId);
       if (r?.error) throw new Error(r.error);
+      setSessionStatus('stopped');
       setCanResumeChat(false);
       setChatDisabledReason('当前会话已停止，不能继续自动执行。请新建会话。');
       setPendingActions([]);
@@ -235,8 +276,11 @@ export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods,
       setSessions((prev) => prev.filter((session) => session.id !== id));
       if (sessionId === id) {
         setSessionId(null);
+        setSessionStatus('');
         setCanResumeChat(true);
         setChatDisabledReason('');
+        setSessionUIContext(null);
+        setActiveSessionTargetLabel('');
         setMessages([]);
         setPendingActions([]);
         setPlan(null);
@@ -245,6 +289,27 @@ export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods,
       message.success('AI session 已删除');
     } catch (e) {
       message.error('删除 AI session 失败: ' + e);
+    }
+  };
+
+  const deleteAllSessions = async () => {
+    try {
+      const r = await api.ai.deleteAllSessions();
+      setSessions([]);
+      setSessionPage(1);
+      setSessionId(null);
+      setSessionStatus('');
+      setCanResumeChat(true);
+      setChatDisabledReason('');
+      setSessionUIContext(null);
+      setActiveSessionTargetLabel('');
+      setMessages([]);
+      setPendingActions([]);
+      setPlan(null);
+      addLog(`[AI] Cleared ${r?.deleted || 0} sessions`);
+      message.success(`已清空 ${r?.deleted || 0} 个 AI session`);
+    } catch (e) {
+      message.error('清空 AI sessions 失败: ' + e);
     }
   };
 
@@ -359,23 +424,32 @@ export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods,
         extra={
           <Space size={4}>
             {!sessionId ? (
-              <Button size="small" type="primary" onClick={createSession}>新建会话</Button>
+              <Button size="small" type="primary" onClick={createSession} disabled={!hasTargetContext}>新建会话</Button>
             ) : (
               <>
-                <Button size="small" danger onClick={stopSession} loading={loading}>停止</Button>
+                {canResumeChat && sessionStatus !== 'stopped' && (
+                  <Button size="small" danger onClick={stopSession} loading={loading}>停止</Button>
+                )}
                 <Button size="small" onClick={closeSession}>关闭</Button>
-                <Button size="small" type="primary" onClick={createSession}>新建会话</Button>
+                <Button size="small" type="primary" onClick={createSession} disabled={!hasTargetContext}>新建会话</Button>
               </>
             )}
           </Space>
         }>
-        {(sharedPodSelection || sharedPods.length > 0) && (
+        {!hasTargetContext && (
+          <div style={{ marginBottom: 8, padding: 8, background: '#fff7e6', borderRadius: 6 }}>
+            <Text type="warning" style={{ fontSize: 11 }}>
+              先在左侧选择一个保存的 target，或先输入目标地址，AI 会话才会绑定到正确的上下文。
+            </Text>
+          </div>
+        )}
+        {(sessionId || visibleSessionContext) && (
           <div style={{ marginBottom: 8, padding: 8, background: '#fafafa', borderRadius: 6 }}>
             <Text type="secondary" style={{ fontSize: 11 }}>
-              当前会话会复用 Web 面板上下文：
-              {sharedPodSelection ? ` Pod ${sharedPodSelection.namespace}/${sharedPodSelection.name}` : ' 尚未指定当前 Pod'}
-              {sharedPodSelection?.container ? ` (container: ${sharedPodSelection.container})` : ''}
-              {sharedPods.length > 0 ? `；共享缓存 ${sharedPods.length} 个 Pod（来源: ${sharedPodSourceLabel}）` : ''}
+              {sessionId ? `已打开会话绑定目标: ${activeSessionTargetLabel || 'unknown target'}。` : '新建会话将复用当前 Web 面板上下文：'}
+              {visibleSelectedPod ? ` Pod ${visibleSelectedPod.namespace}/${visibleSelectedPod.name}` : sessionId ? ' 该会话未保存当前 Pod 上下文。' : ' 尚未指定当前 Pod'}
+              {visibleSelectedPod?.container ? ` (container: ${visibleSelectedPod.container})` : ''}
+              {visiblePodCount > 0 ? `；共享缓存 ${visiblePodCount} 个 Pod${visiblePodSourceLabel ? `（来源: ${visiblePodSourceLabel}）` : ''}` : ''}
             </Text>
           </div>
         )}
@@ -450,7 +524,21 @@ export default function AITab({ getAuth, addLog, host, activeTarget, sharedPods,
       <Card
         title={<span><RobotOutlined /> AI Sessions</span>}
         size="small"
-        extra={<Button size="small" icon={<ReloadOutlined />} onClick={loadSessions} loading={sessionLoading}>刷新</Button>}
+        extra={(
+          <Space size={4}>
+            <Button size="small" icon={<ReloadOutlined />} onClick={loadSessions} loading={sessionLoading}>刷新</Button>
+            <Popconfirm
+              title="清空 AI sessions"
+              description="会删除本地保存的全部 AI 会话历史。"
+              okText="清空"
+              cancelText="取消"
+              disabled={sessions.length === 0}
+              onConfirm={deleteAllSessions}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />} disabled={sessions.length === 0}>清空历史</Button>
+            </Popconfirm>
+          </Space>
+        )}
       >
         <List
           size="small"

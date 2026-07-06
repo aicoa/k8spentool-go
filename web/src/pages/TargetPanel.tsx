@@ -1,5 +1,5 @@
 import React from 'react';
-import { Button, List, Popconfirm, Space, Typography } from 'antd';
+import { Button, List, Popconfirm, Space, Tooltip, Typography } from 'antd';
 import { ClearOutlined, DeleteOutlined } from '@ant-design/icons';
 import { Target } from '../services/api';
 
@@ -32,10 +32,12 @@ export default function TargetPanel({ targets, active, onSelect, onDelete, onCle
         >
           <Button
             size="small"
-            type="text"
+            danger
             disabled={targets.length === 0}
-            icon={<ClearOutlined style={{ color: targets.length === 0 ? '#666' : '#fff' }} />}
-          />
+            icon={<ClearOutlined />}
+          >
+            清空
+          </Button>
         </Popconfirm>
       </div>
       <List
@@ -51,6 +53,9 @@ export default function TargetPanel({ targets, active, onSelect, onDelete, onCle
                 <br /><Typography.Text style={{ color: '#aaa', fontSize: 10 }}>{authLabel(t)}</Typography.Text>
               </div>
               <Space size={4}>
+                <Button size="small" type="primary" onClick={() => onSelect(t)}>
+                  打开
+                </Button>
                 <Popconfirm
                   title="删除目标"
                   description={`确认删除 ${t.host}:${t.port} 吗？`}
@@ -58,7 +63,9 @@ export default function TargetPanel({ targets, active, onSelect, onDelete, onCle
                   cancelText="取消"
                   onConfirm={() => onDelete(t)}
                 >
-                  <Button size="small" type="text" icon={<DeleteOutlined style={{ color: '#fff' }} />} />
+                  <Tooltip title="删除目标">
+                    <Button size="small" danger icon={<DeleteOutlined />} />
+                  </Tooltip>
                 </Popconfirm>
               </Space>
             </div>

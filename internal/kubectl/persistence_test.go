@@ -140,3 +140,10 @@ metadata:
 		t.Fatalf("expected cluster-scoped resource namespace to stay empty, got %q", targets[1].Namespace)
 	}
 }
+
+func TestBuildBackdoorPodPinsNodeWhenProvided(t *testing.T) {
+	pod := BuildBackdoorPod("escape-pod", "default", "alpine:3.20", "/host", "worker-2")
+	if pod.Spec.NodeName != "worker-2" {
+		t.Fatalf("expected escape pod to pin node worker-2, got %q", pod.Spec.NodeName)
+	}
+}

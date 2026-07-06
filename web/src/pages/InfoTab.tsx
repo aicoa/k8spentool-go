@@ -14,6 +14,7 @@ export default function InfoTab({ getAuth, addLog, activeTarget }: Props) {
   const [portRef, setPortRef] = useState<any[]>([]);
   const [capHex, setCapHex] = useState('');
   const [capResult, setCapResult] = useState<any>(null);
+  const [portScanResult, setPortScanResult] = useState<any>(null);
   const [capLoading, setCapLoading] = useState(false);
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({});
 
@@ -53,7 +54,7 @@ export default function InfoTab({ getAuth, addLog, activeTarget }: Props) {
     setLoading('scan', true);
     try {
       const r = await api.info.portScan({ ...targetParams(getAuth()), host: getAuth().host, timeout_sec: 3 });
-      setCapResult(r);
+      setPortScanResult(r);
       addLog('端口扫描完成');
       recordTargetStep(activeTarget, {
         phase: 'info',
@@ -66,7 +67,7 @@ export default function InfoTab({ getAuth, addLog, activeTarget }: Props) {
       }).catch(() => {});
     }
     catch (e) {
-      setCapResult({ error: String(e) }); addLog('[-] 端口扫描失败: ' + e);
+      setPortScanResult({ error: String(e) }); addLog('[-] 端口扫描失败: ' + e);
       recordTargetStep(activeTarget, {
         phase: 'info',
         tool: 'info',
@@ -128,10 +129,8 @@ export default function InfoTab({ getAuth, addLog, activeTarget }: Props) {
         <Space direction="vertical" style={{ width: '100%' }}>
           <Button onClick={portScan} loading={loadingStates['scan']}>扫描 {getAuth().host} 常用端口</Button>
           <Typography.Text style={{ fontSize: 10, color: '#888' }}>使用配置的目标地址进行端口扫描</Typography.Text>
+          <ResultView result={portScanResult} emptyHint="执行端口扫描查看结果" />
         </Space>
-      </Card>
-      <Card title="扫描结果 & Cap解码" size="small" style={{ gridColumn: '1 / -1' }}>
-        <ResultView result={capResult} emptyHint="执行端口扫描或Capabilities解码查看结果" />
       </Card>
     </div>
   );

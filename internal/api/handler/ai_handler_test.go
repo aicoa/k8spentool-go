@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,11 +20,30 @@ type stubAITargetStore struct {
 	session *engine.SessionState
 }
 
+type stubAIChatClient struct {
+	response string
+	err      error
+}
+
 func (s stubAITargetStore) GetSession(id string) (*engine.SessionState, bool) {
 	if s.session == nil || s.session.Target == nil || s.session.Target.ID != id {
 		return nil, false
 	}
 	return s.session, true
+}
+
+func (s stubAIChatClient) Chat(ctx context.Context, messages []ai.Message, tools []ai.ToolDefinition) (*ai.ChatResponse, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &ai.ChatResponse{
+		Choices: []ai.Choice{{
+			Message: ai.ResponseMessage{
+				Role:    "assistant",
+				Content: s.response,
+			},
+		}},
+	}, nil
 }
 
 func TestBuildMessagesFromHistoryPreservesToolContext(t *testing.T) {
@@ -115,6 +137,63 @@ func TestBuildSystemPromptIncludesUIContext(t *testing.T) {
 	}
 }
 
+func TestNormalizeToolCallForSessionUsesSelectedPodDefaults(t *testing.T) {
+	call := ai.ToolCall{
+		ID:   "call-1",
+		Type: "function",
+		Function: ai.FunctionCallArg{
+			Name:      "exec_command",
+			Arguments: `{"command":"id"}`,
+		},
+	}
+
+	normalized := normalizeToolCallForSession(call, &AISessionUIContext{
+		SelectedPod: &AISessionPodContext{
+			Namespace: "kube-system",
+			Name:      "system-monitor",
+			Container: "alpine",
+		},
+	})
+
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(normalized.Function.Arguments), &args); err != nil {
+		t.Fatalf("expected normalized arguments to be valid JSON: %v", err)
+	}
+	if got := args["namespace"]; got != "kube-system" {
+		t.Fatalf("expected namespace from selected pod, got %#v", got)
+	}
+	if got := args["pod_name"]; got != "system-monitor" {
+		t.Fatalf("expected pod_name from selected pod, got %#v", got)
+	}
+	if got := args["container_name"]; got != "alpine" {
+		t.Fatalf("expected container_name from selected pod, got %#v", got)
+	}
+}
+
+func TestNormalizeToolCallForSessionSplitsSecretShorthand(t *testing.T) {
+	call := ai.ToolCall{
+		ID:   "call-2",
+		Type: "function",
+		Function: ai.FunctionCallArg{
+			Name:      "lateral_view_secret",
+			Arguments: `{"secret_name":"kube-system/admin-user-token-84kfz"}`,
+		},
+	}
+
+	normalized := normalizeToolCallForSession(call, &AISessionUIContext{})
+
+	var args map[string]interface{}
+	if err := json.Unmarshal([]byte(normalized.Function.Arguments), &args); err != nil {
+		t.Fatalf("expected normalized arguments to be valid JSON: %v", err)
+	}
+	if got := args["namespace"]; got != "kube-system" {
+		t.Fatalf("expected namespace from shorthand, got %#v", got)
+	}
+	if got := args["secret_name"]; got != "admin-user-token-84kfz" {
+		t.Fatalf("expected secret_name from shorthand, got %#v", got)
+	}
+}
+
 func TestUpdateConfigCanClearAPIKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("HOME", t.TempDir())
@@ -174,6 +253,31 @@ func TestHydrateSessionAuthFromTarget(t *testing.T) {
 	}
 }
 
+func TestHydrateSessionAuthMergesMissingCredentialsFromTarget(t *testing.T) {
+	handler := NewAIHandler(nil)
+	session := &AISession{
+		ID:       "session-1",
+		TargetID: "target-1",
+		Target: &engine.Target{
+			ID:         "target-1",
+			Host:       "demo.local",
+			Username:   "alice",
+			Password:   "secret",
+			SkipTLS:    true,
+			TimeoutSec: 15,
+			AuthType:   engine.AuthUserPass,
+		},
+		Auth: &ai.AuthCreds{Host: "demo.local"},
+	}
+
+	if !handler.hydrateSessionAuth(session) {
+		t.Fatalf("expected auth hydration to enrich existing auth")
+	}
+	if session.Auth == nil || session.Auth.Username != "alice" || session.Auth.Password != "secret" {
+		t.Fatalf("expected missing credentials to be merged from target, got %#v", session.Auth)
+	}
+}
+
 func TestSessionResponsesSanitizeSensitiveFields(t *testing.T) {
 	handler := NewAIHandler(nil)
 	session := &AISession{
@@ -204,6 +308,29 @@ func TestSessionResponsesSanitizeSensitiveFields(t *testing.T) {
 	}
 	if detail.Target.Token != "" || detail.Target.Password != "" || detail.Target.Kubeconfig != "" {
 		t.Fatalf("expected sensitive fields to be stripped from detail target, got %#v", detail.Target)
+	}
+}
+
+func TestSessionResponseMarksIncompleteCredentialSessionsAsNotResumable(t *testing.T) {
+	handler := NewAIHandler(nil)
+	session := &AISession{
+		ID:       "session-1",
+		TargetID: "target-1",
+		Target: &engine.Target{
+			ID:       "target-1",
+			Host:     "demo.local",
+			AuthType: engine.AuthUserPass,
+		},
+		Auth: &ai.AuthCreds{Host: "demo.local"},
+	}
+
+	summary := handler.sessionSummaryResponse(session)
+	if summary.CanResumeChat {
+		t.Fatalf("expected host-only userpass session to be non-resumable")
+	}
+	detail := handler.sessionDetailResponse(session)
+	if detail.CanResumeChat {
+		t.Fatalf("expected host-only userpass session detail to be non-resumable")
 	}
 }
 
@@ -393,5 +520,85 @@ func TestNormalizeSessionStatusPromotesLegacyCreatedSessions(t *testing.T) {
 	sessionWithPending := &AISession{Status: "created", PendingActions: []PendingToolAction{{ID: "action-1"}}}
 	if got := normalizeSessionStatus(sessionWithPending); got != "awaiting_approval" {
 		t.Fatalf("expected created session with pending actions to normalize to awaiting_approval, got %q", got)
+	}
+}
+
+func TestGeneratePlanPersistsSessionToDisk(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("HOME", t.TempDir())
+
+	handler := NewAIHandler(nil)
+	handler.llmClient = stubAIChatClient{
+		response: `{"steps":[{"phase":"info","tool":"info","action":"scan","description":"collect entry points"}]}`,
+	}
+	handler.sessions["session-1"] = &AISession{
+		ID:        "session-1",
+		TargetID:  "target-1",
+		Status:    "active",
+		CreatedAt: time.Now(),
+		Auth:      &ai.AuthCreds{Host: "demo.local"},
+	}
+
+	router := gin.New()
+	router.POST("/ai/sessions/:id/plan", handler.GeneratePlan)
+
+	req := httptest.NewRequest(http.MethodPost, "/ai/sessions/session-1/plan", strings.NewReader(`{"objective":"test plan"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected generate plan to succeed, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	session := handler.sessions["session-1"]
+	if session.Plan == nil || len(session.Plan.Steps) != 1 {
+		t.Fatalf("expected plan to be stored in memory, got %#v", session.Plan)
+	}
+
+	sessionFile := filepath.Join(handler.sessionsDir, "session-1.json")
+	data, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatalf("expected session file to be written, got %v", err)
+	}
+	var stored AISession
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("expected session file to contain valid json, got %v", err)
+	}
+	if stored.Plan == nil || len(stored.Plan.Steps) != 1 {
+		t.Fatalf("expected persisted plan in session file, got %#v", stored.Plan)
+	}
+	if stored.Status != "planning" {
+		t.Fatalf("expected persisted session status planning, got %q", stored.Status)
+	}
+}
+
+func TestDeleteAllSessionsClearsMemoryAndFiles(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("HOME", t.TempDir())
+
+	handler := NewAIHandler(nil)
+	handler.sessions["session-1"] = &AISession{ID: "session-1", CreatedAt: time.Now()}
+	handler.sessions["session-2"] = &AISession{ID: "session-2", CreatedAt: time.Now()}
+	handler.saveSession(handler.sessions["session-1"])
+	handler.saveSession(handler.sessions["session-2"])
+
+	router := gin.New()
+	router.DELETE("/ai/sessions", handler.DeleteAllSessions)
+
+	req := httptest.NewRequest(http.MethodDelete, "/ai/sessions", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected delete-all to succeed, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(handler.sessions) != 0 {
+		t.Fatalf("expected in-memory sessions to be cleared, got %d", len(handler.sessions))
+	}
+	for _, id := range []string{"session-1", "session-2"} {
+		if _, err := os.Stat(filepath.Join(handler.sessionsDir, id+".json")); !os.IsNotExist(err) {
+			t.Fatalf("expected session file %s to be removed, stat err=%v", id, err)
+		}
 	}
 }

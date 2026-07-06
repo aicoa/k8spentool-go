@@ -304,7 +304,7 @@ func checkK8sAPIAccess(ctx context.Context, t *TargetInfo) (*CheckResult, error)
 			Summary: "No target host specified"}, nil
 	}
 	url := fmt.Sprintf("https://%s:%d/api", t.Host, t.Port)
-	code, _, err := util.SendRequest(url, "GET", t.Token, t.TimeoutSec, t.SkipTLS)
+	code, _, err := util.SendRequestWithAuth(url, "GET", t.Token, t.Username, t.Password, t.TimeoutSec, t.SkipTLS)
 	accessible := err == nil && code < 500
 	return &CheckResult{
 		CheckID: "k8s_api_access", CheckName: "K8s API Access",

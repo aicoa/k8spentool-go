@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Layout, Tabs, Input, Button, Space, message, Radio, Switch, Collapse } from 'antd';
 import { CloudServerOutlined, SafetyOutlined, ThunderboltOutlined, LockOutlined, RiseOutlined, NodeIndexOutlined, CodeOutlined, RobotOutlined, UserOutlined, KeyOutlined, BugOutlined, GlobalOutlined, BookOutlined } from '@ant-design/icons';
 import TargetPanel from './pages/TargetPanel';
@@ -73,6 +73,54 @@ function findMatchingTarget(targetList: Target[], draft: {
   return targetList.find((target) => targetMatchesDraft(target, draft));
 }
 
+function firstPodContainerName(pod?: PodRecord | null) {
+  if (!pod?.containers) return undefined;
+  const first = pod.containers.split(',').map((entry) => entry.trim()).find(Boolean);
+  return first || undefined;
+}
+
+function podRecordKey(pod: PodRecord) {
+  const namespace = pod.namespace?.trim() || 'default';
+  return `${namespace}/${pod.name}`;
+}
+
+function mergePodRecords(existing: PodRecord[], incoming: PodRecord[], namespaceFilter?: string) {
+  const filteredNamespace = namespaceFilter?.trim();
+  if (!filteredNamespace) return incoming;
+
+  const merged = new Map<string, PodRecord>();
+  for (const pod of existing) {
+    const namespace = pod.namespace?.trim() || 'default';
+    if (namespace === filteredNamespace) continue;
+    merged.set(podRecordKey(pod), { ...pod, namespace });
+  }
+  for (const pod of incoming) {
+    const normalized = { ...pod, namespace: pod.namespace?.trim() || 'default' };
+    merged.set(podRecordKey(normalized), normalized);
+  }
+  return Array.from(merged.values()).sort((left, right) => {
+    const namespaceDiff = (left.namespace || 'default').localeCompare(right.namespace || 'default');
+    if (namespaceDiff !== 0) return namespaceDiff;
+    return left.name.localeCompare(right.name);
+  });
+}
+
+function isAPIServerReachable(result: any) {
+  return result?.reachable === true;
+}
+
+function isAPIServerAccessible(result: any) {
+  return result?.accessible === true;
+}
+
+function isReachableForbidden(result: any) {
+  return result?.reachable === true && result?.status_code === 403;
+}
+
+function isReachableUnauthorized(result: any) {
+  return result?.reachable === true && result?.status_code === 401;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('access');
   const [host, setHost] = useState('');
@@ -93,6 +141,7 @@ export default function App() {
   const [proxyLoading, setProxyLoading] = useState(false);
   const [sharedPodsByTarget, setSharedPodsByTarget] = useState<Record<string, SharedPodContext>>({});
   const [sharedPodSelectionByTarget, setSharedPodSelectionByTarget] = useState<Record<string, PodSelection | null>>({});
+  const sharedPodHydrationAttemptsRef = useRef<Record<string, string>>({});
 
   const getStoredActiveTargetId = () => {
     if (typeof window === 'undefined') return '';
@@ -176,25 +225,42 @@ export default function App() {
 
   const updateSharedPods = (pods: PodRecord[], source: PodListSource, options?: { namespaceFilter?: string; autoSelectFirst?: boolean }) => {
     if (!currentPodContextKey) return;
+    const namespaceFilter = options?.namespaceFilter?.trim() || '';
+    const nextPods = mergePodRecords(sharedPodsByTarget[currentPodContextKey]?.pods || [], pods, namespaceFilter);
     setSharedPodsByTarget((prev) => ({
       ...prev,
       [currentPodContextKey]: {
-        pods,
+        pods: nextPods,
         source,
         updated_at: new Date().toISOString(),
-        namespace_filter: options?.namespaceFilter,
+        namespace_filter: namespaceFilter && nextPods.length === pods.length ? namespaceFilter : undefined,
       },
     }));
     setSharedPodSelectionByTarget((prev) => {
       const current = prev[currentPodContextKey];
-      const stillExists = current && pods.some((item) => item.name === current.name && normalizeNamespace(item.namespace) === normalizeNamespace(current.namespace));
-      if (stillExists) return prev;
-      if (options?.autoSelectFirst && pods.length > 0) {
+      const podPool = nextPods;
+      const matchedCurrentPod = current
+        ? podPool.find((item) => item.name === current.name && normalizeNamespace(item.namespace) === normalizeNamespace(current.namespace))
+        : undefined;
+      if (matchedCurrentPod) {
+        const nextContainer = current?.container || firstPodContainerName(matchedCurrentPod);
+        if (nextContainer === current?.container) return prev;
         return {
           ...prev,
           [currentPodContextKey]: {
-            namespace: normalizeNamespace(pods[0].namespace),
-            name: pods[0].name,
+            namespace: normalizeNamespace(current?.namespace),
+            name: current?.name || matchedCurrentPod.name,
+            container: nextContainer,
+          },
+        };
+      }
+      if (options?.autoSelectFirst && podPool.length > 0) {
+        return {
+          ...prev,
+          [currentPodContextKey]: {
+            namespace: normalizeNamespace(podPool[0].namespace),
+            name: podPool[0].name,
+            container: firstPodContainerName(podPool[0]),
           },
         };
       }
@@ -290,6 +356,57 @@ export default function App() {
     setStoredActiveTargetId(matchingTargetForDraft.id);
   }, [activeTarget, host, matchingTargetForDraft]);
 
+  useEffect(() => {
+    if (!effectiveTargetId || !host.trim()) return;
+    if (sharedPodContext?.pods?.length) return;
+
+    const authSignature = JSON.stringify({
+      host: host.trim(),
+      authMode,
+      token,
+      username,
+      password,
+      skipTLS,
+      timeout,
+    });
+    if (sharedPodHydrationAttemptsRef.current[currentPodContextKey] === authSignature) {
+      return;
+    }
+    sharedPodHydrationAttemptsRef.current[currentPodContextKey] = authSignature;
+
+    let cancelled = false;
+    const auth = getAuth();
+    api.kubectl.getPods(targetParams(auth)).then((result: any) => {
+      if (cancelled) return;
+      if (Array.isArray(result?.pods) && result.pods.length > 0) {
+        updateSharedPods(result.pods, 'kubectl', { autoSelectFirst: true });
+        addLog(`[+] 自动同步目标 Pod 成功: ${auth.host} (${result.total || result.pods.length} pods)`);
+        return;
+      }
+      if (result?.error) {
+        addLog(`[-] 自动同步目标 Pod 失败: ${result.error}`);
+      }
+    }).catch((error) => {
+      if (cancelled) return;
+      addLog(`[-] 自动同步目标 Pod 失败: ${error}`);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    effectiveTargetId,
+    currentPodContextKey,
+    sharedPodContext?.pods?.length,
+    host,
+    authMode,
+    token,
+    username,
+    password,
+    skipTLS,
+    timeout,
+  ]);
+
   const addLog = (msg: string) => {
     const ts = new Date().toLocaleTimeString();
     setLogs((prev) => [...prev.slice(-1000), `[${ts}] ${msg}`]);
@@ -340,7 +457,8 @@ export default function App() {
   const handleConnect = async () => {
     if (!host) { message.error('请输入目标地址'); return; }
     try {
-      // Step 1: Verify credentials by making a test API call
+      // Step 1: verify reachability and auth. We treat "can list pods" as strong success,
+      // but we also accept "APIServer reachable with 403" because limited RBAC is still a valid target.
       const auth: AuthConfig = {
         host,
         token: authMode === 'token' ? token : undefined,
@@ -350,10 +468,15 @@ export default function App() {
       };
       addLog(`[*] 正在验证连接: ${host}...`);
 
+      const requestedAuthType = authMode === 'token' && token
+        ? 'token'
+        : (authMode === 'userpass' && (username || password) ? 'userpass' : 'none');
       const anonParams = { target_host: host, skip_tls: skipTLS, timeout_sec: 5 };
-      const [verifyAttempt, anonAttempt] = await Promise.allSettled([
+      const [verifyAttempt, verifyAccessAttempt, anonAttempt, anonAccessAttempt] = await Promise.allSettled([
         api.kubectl.getPods(targetParams(auth)),
+        api.access.apiServer(targetParams(auth)),
         api.kubectl.getPods(anonParams),
+        api.access.apiServer(anonParams),
       ]);
 
       let verifyResult: any;
@@ -363,30 +486,63 @@ export default function App() {
         addLog(`[-] 凭据验证失败: ${verifyAttempt.reason}`);
       }
 
+      let verifyAccessResult: any;
+      if (verifyAccessAttempt.status === 'fulfilled') {
+        verifyAccessResult = verifyAccessAttempt.value;
+      }
+
       let anonResult: any;
       if (anonAttempt.status === 'fulfilled') {
         anonResult = anonAttempt.value;
       }
 
-      const anonAccessible = hasListAccess(anonResult, 'pods');
+      let anonAccessResult: any;
+      if (anonAccessAttempt.status === 'fulfilled') {
+        anonAccessResult = anonAccessAttempt.value;
+      }
+
       const authWorks = hasListAccess(verifyResult, 'pods');
+      const authAPIAccessible = isAPIServerAccessible(verifyAccessResult);
+      const authLimited = requestedAuthType !== 'none' && isReachableForbidden(verifyAccessResult);
+      const authUnauthorized = requestedAuthType !== 'none' && isReachableUnauthorized(verifyAccessResult);
+      const authVerified = authWorks || authAPIAccessible || authLimited;
+
+      const anonPodAccess = hasListAccess(anonResult, 'pods');
+      const anonAccessible = anonPodAccess || isAPIServerAccessible(anonAccessResult);
+      const anonymousReachable = isAPIServerReachable(anonAccessResult);
+
       const verifiedPodCount = Number.isFinite(verifyResult?.total) ? verifyResult.total : 0;
       const anonymousPodCount = Number.isFinite(anonResult?.total) ? anonResult.total : 0;
 
-      if (!authWorks && !anonAccessible) {
-        const verifyError = verifyResult?.error ? String(verifyResult.error) : '';
-        const detail = verifyError || 'API Server / 匿名访问均未验证通过';
+      if (!authVerified && !anonAccessible) {
+        let detail = '';
+        if (authUnauthorized) {
+          detail = '认证失败或凭据无效（API Server 返回 401）';
+        } else if (verifyResult?.error) {
+          detail = String(verifyResult.error);
+        } else if (verifyAccessResult?.error) {
+          detail = String(verifyAccessResult.error);
+        } else if (anonymousReachable) {
+          detail = '目标可达，但当前匿名与提供凭据都没有足够访问权限';
+        } else {
+          detail = 'API Server / 匿名访问均未验证通过';
+        }
         addLog(`[-] 连接验证失败: ${host} (${detail})`);
         message.error(`连接失败，未验证可访问性: ${detail}`);
         return;
       }
 
       // Step 2: Save target
-      const requestedAuthType = authMode === 'token' && token
-        ? 'token'
-        : (authMode === 'userpass' && (username || password) ? 'userpass' : 'none');
-      const shouldPersistAnonymous = anonAccessible && !authWorks;
+      const shouldPersistAnonymous = anonAccessible && !authVerified;
       const authType = shouldPersistAnonymous ? 'none' : requestedAuthType;
+      const sharedPodResult = authWorks ? verifyResult : (anonPodAccess ? anonResult : null);
+      if (Array.isArray(sharedPodResult?.pods) && sharedPodResult.pods.length > 0) {
+        updateSharedPods(
+          sharedPodResult.pods,
+          sharedPodResult?.source === 'kubelet' ? 'kubelet' : 'kubectl',
+          { autoSelectFirst: true },
+        );
+      }
       const result = await api.targets.create({
         host, port: 6443,
         token: authType === 'token' ? token : undefined,
@@ -406,6 +562,14 @@ export default function App() {
         const authLabel = authType === 'token' ? 'Token' : authType === 'userpass' ? '用户名密码' : '匿名';
         addLog(`[+] 目标已验证: ${host} (${authLabel})，共 ${verifiedPodCount} 个Pod`);
         message.success(authType === 'none' ? `匿名连接成功 (${verifiedPodCount} pods)` : `连接成功，已认证 (${verifiedPodCount} pods)`);
+      } else if (authLimited) {
+        const authLabel = authType === 'token' ? 'Token' : '用户名密码';
+        addLog(`[+] 目标已保存: ${host} (${authLabel})，API Server 可达但当前凭据无 pods/list 权限`);
+        message.warning('连接成功，但当前凭据缺少 Pod 列表权限；目标已保存');
+      } else if (authAPIAccessible) {
+        const authLabel = authType === 'token' ? 'Token' : authType === 'userpass' ? '用户名密码' : '匿名';
+        addLog(`[+] 目标已验证: ${host} (${authLabel})，API Server 可访问`);
+        message.success('连接成功，目标已保存');
       } else {
         addLog(`[+] 目标已保存: ${host}`);
         message.success('目标已保存');
@@ -458,6 +622,115 @@ export default function App() {
       message.error('清空 targets 失败: ' + e);
     }
   };
+
+  const tabItems = [
+    {
+      key: 'access',
+      label: <span><ThunderboltOutlined />初始访问</span>,
+      children: (
+        <AccessTab
+          getAuth={getAuth}
+          addLog={addLog}
+          activeTarget={effectiveTargetId}
+          onOpenDashboard={() => setActiveTab('dashboard')}
+          onOpenExec={() => setActiveTab('exec')}
+          onOpenKubectl={() => setActiveTab('kubectl')}
+          sharedPods={sharedPodContext?.pods || []}
+          sharedPodSource={sharedPodContext?.source || null}
+          sharedPodSelection={sharedPodSelection}
+          onSelectSharedPod={selectSharedPod}
+        />
+      ),
+    },
+    {
+      key: 'exec',
+      label: <span><CodeOutlined />命令执行</span>,
+      children: (
+        <ExecTab
+          getAuth={getAuth}
+          addLog={addLog}
+          activeTarget={effectiveTargetId}
+          sharedPods={sharedPodContext?.pods || []}
+          sharedPodSource={sharedPodContext?.source || null}
+          sharedPodSelection={sharedPodSelection}
+          onUpdateSharedPods={updateSharedPods}
+          onSelectSharedPod={selectSharedPod}
+        />
+      ),
+    },
+    {
+      key: 'persist',
+      label: <span><LockOutlined />权限维持</span>,
+      children: <PersistTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />,
+    },
+    {
+      key: 'escape',
+      label: <span><RiseOutlined />权限提升</span>,
+      children: <EscapeTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />,
+    },
+    {
+      key: 'lateral',
+      label: <span><NodeIndexOutlined />横向移动</span>,
+      children: <LateralTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />,
+    },
+    {
+      key: 'kubectl',
+      label: <span><CloudServerOutlined />kubectl</span>,
+      children: (
+        <KubectlTab
+          getAuth={getAuth}
+          addLog={addLog}
+          activeTarget={effectiveTargetId}
+          sharedPods={sharedPodContext?.pods || []}
+          sharedPodSource={sharedPodContext?.source || null}
+          sharedPodSelection={sharedPodSelection}
+          onUpdateSharedPods={updateSharedPods}
+          onSelectSharedPod={selectSharedPod}
+        />
+      ),
+    },
+    {
+      key: 'ai',
+      label: <span><RobotOutlined />AI助手</span>,
+      children: (
+        <AITab
+          getAuth={getAuth}
+          addLog={addLog}
+          host={host}
+          activeTarget={effectiveTargetId}
+          sharedPods={sharedPodContext?.pods || []}
+          sharedPodSource={sharedPodContext?.source || null}
+          sharedPodSelection={sharedPodSelection}
+        />
+      ),
+    },
+    {
+      key: 'cdk',
+      label: <span><BugOutlined />CDK战术</span>,
+      children: (
+        <CDKTab
+          getAuth={getAuth}
+          addLog={addLog}
+          activeTarget={effectiveTargetId}
+          sharedPods={sharedPodContext?.pods || []}
+          sharedPodSource={sharedPodContext?.source || null}
+          sharedPodSelection={sharedPodSelection}
+          onUpdateSharedPods={updateSharedPods}
+          onSelectSharedPod={selectSharedPod}
+        />
+      ),
+    },
+    {
+      key: 'dashboard',
+      label: <span><ThunderboltOutlined />Dashboard</span>,
+      children: <DashboardTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />,
+    },
+    {
+      key: 'info',
+      label: <span><BookOutlined />命令备忘录</span>,
+      children: <InfoTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />,
+    },
+  ];
 
   return (
     <Layout className="app-layout">
@@ -574,84 +847,14 @@ export default function App() {
       </Sider>
       <Layout>
         <Content>
-          <Tabs activeKey={activeTab} onChange={setActiveTab} size="small" type="card" destroyInactiveTabPane={false}>
-            <Tabs.TabPane tab={<span><ThunderboltOutlined />初始访问</span>} key="access">
-              <AccessTab
-                getAuth={getAuth}
-                addLog={addLog}
-                activeTarget={effectiveTargetId}
-                onOpenDashboard={() => setActiveTab('dashboard')}
-                onOpenExec={() => setActiveTab('exec')}
-                onOpenKubectl={() => setActiveTab('kubectl')}
-                sharedPods={sharedPodContext?.pods || []}
-                sharedPodSource={sharedPodContext?.source || null}
-                sharedPodSelection={sharedPodSelection}
-                onSelectSharedPod={selectSharedPod}
-              />
-            </Tabs.TabPane>
-            <Tabs.TabPane tab={<span><CodeOutlined />命令执行</span>} key="exec">
-              <ExecTab
-                getAuth={getAuth}
-                addLog={addLog}
-                activeTarget={effectiveTargetId}
-                sharedPods={sharedPodContext?.pods || []}
-                sharedPodSource={sharedPodContext?.source || null}
-                sharedPodSelection={sharedPodSelection}
-                onUpdateSharedPods={updateSharedPods}
-                onSelectSharedPod={selectSharedPod}
-              />
-            </Tabs.TabPane>
-            <Tabs.TabPane tab={<span><LockOutlined />权限维持</span>} key="persist">
-              <PersistTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />
-            </Tabs.TabPane>
-            <Tabs.TabPane tab={<span><RiseOutlined />权限提升</span>} key="escape">
-              <EscapeTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />
-            </Tabs.TabPane>
-            <Tabs.TabPane tab={<span><NodeIndexOutlined />横向移动</span>} key="lateral">
-              <LateralTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />
-            </Tabs.TabPane>
-            <Tabs.TabPane tab={<span><CloudServerOutlined />kubectl</span>} key="kubectl">
-              <KubectlTab
-                getAuth={getAuth}
-                addLog={addLog}
-                activeTarget={effectiveTargetId}
-                sharedPods={sharedPodContext?.pods || []}
-                sharedPodSource={sharedPodContext?.source || null}
-                sharedPodSelection={sharedPodSelection}
-                onUpdateSharedPods={updateSharedPods}
-                onSelectSharedPod={selectSharedPod}
-              />
-            </Tabs.TabPane>
-            <Tabs.TabPane tab={<span><RobotOutlined />AI助手</span>} key="ai">
-              <AITab
-                getAuth={getAuth}
-                addLog={addLog}
-                host={host}
-                activeTarget={effectiveTargetId}
-                sharedPods={sharedPodContext?.pods || []}
-                sharedPodSource={sharedPodContext?.source || null}
-                sharedPodSelection={sharedPodSelection}
-              />
-            </Tabs.TabPane>
-            <Tabs.TabPane tab={<span><BugOutlined />CDK战术</span>} key="cdk">
-              <CDKTab
-                getAuth={getAuth}
-                addLog={addLog}
-                activeTarget={effectiveTargetId}
-                sharedPods={sharedPodContext?.pods || []}
-                sharedPodSource={sharedPodContext?.source || null}
-                sharedPodSelection={sharedPodSelection}
-                onUpdateSharedPods={updateSharedPods}
-                onSelectSharedPod={selectSharedPod}
-              />
-            </Tabs.TabPane>
-            <Tabs.TabPane tab={<span><ThunderboltOutlined />Dashboard</span>} key="dashboard">
-              <DashboardTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />
-            </Tabs.TabPane>
-            <Tabs.TabPane tab={<span><BookOutlined />命令备忘录</span>} key="info">
-              <InfoTab getAuth={getAuth} addLog={addLog} activeTarget={effectiveTargetId} />
-            </Tabs.TabPane>
-          </Tabs>
+          <Tabs
+            activeKey={activeTab}
+            onChange={setActiveTab}
+            size="small"
+            type="card"
+            destroyOnHidden={false}
+            items={tabItems}
+          />
         </Content>
         <Footer className="status-bar">
           <LogPanel logs={logs} />

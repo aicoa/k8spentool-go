@@ -31,7 +31,7 @@ func (h *DashboardHandler) buildClient(c *gin.Context) (*kubectl.Client, string,
 		Password   string `json:"password"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindRequestJSON(c, &req); err != nil {
 		return nil, "", err
 	}
 	server := kubectl.APIServerURL(req.TargetHost)
@@ -44,7 +44,7 @@ func (h *DashboardHandler) buildClient(c *gin.Context) (*kubectl.Client, string,
 func (h *DashboardHandler) Discover(c *gin.Context) {
 	client, server, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
@@ -331,6 +331,7 @@ func (h *DashboardHandler) executeProbe(req dashboardProbeRequest) gin.H {
 	normalizeDashboardProbeRequest(&req)
 
 	httpClient := util.BuildHTTPClient(req.SkipTLS, req.TimeoutSec)
+	probeHost := kubectl.TargetHostname(req.TargetHost)
 	results := make([]gin.H, 0)
 	accessible := false
 	skipLoginAvailable := false
@@ -340,7 +341,7 @@ func (h *DashboardHandler) executeProbe(req dashboardProbeRequest) gin.H {
 	for _, port := range candidateDashboardPorts(req.DashboardPort) {
 		for _, scheme := range candidateSchemesForDashboardPort(port, req.UseHTTPS) {
 			for _, path := range candidateDashboardPaths(req.DashboardPath) {
-				url := fmt.Sprintf("%s://%s:%d%s", scheme, req.TargetHost, port, path)
+				url := kubectl.TargetServiceURL(probeHost, scheme, port, path)
 				resp, err := httpClient.Get(url)
 				if err != nil {
 					continue
@@ -434,7 +435,7 @@ func (h *DashboardHandler) getAttackSteps(targetHost string) []gin.H {
 func (h *DashboardHandler) ExtractToken(c *gin.Context) {
 	client, server, err := h.buildClient(c)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		writeHandlerError(c, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)

@@ -74,14 +74,16 @@ export default function PersistTab({ getAuth, addLog, activeTarget }: Props) {
 
   const handleSA = () => run(() => api.persist.createSA({ ...base, namespace: saNs, sa_name: saName, binding_name: saBind }), setSaResult, setSaLoading, 'Admin SA deployed');
   const handleSAToken = () => run(() => api.persist.getSAToken({ ...base, namespace: saNs, sa_name: saName }), setSaResult, setSaLoading, 'SA Token retrieved');
-  const handleCJ = () => run(() => api.persist.cronjob({ ...base, namespace: cjNs, name: cjName, image: cjImg, schedule: cjSched, command: cjCmd }), setCjResult, setCjLoading, 'CronJob deployed');
-  const handleDS = () => run(() => api.persist.daemonset({ ...base, namespace: dsNs, name: dsName, image: dsImg, mount_path: dsMount, command: dsCmd }), setDsResult, setDsLoading, 'DaemonSet deployed');
+  const handleCJ = (apply: boolean) => run(() => api.persist.cronjob({ ...base, namespace: cjNs, name: cjName, image: cjImg, schedule: cjSched, command: cjCmd, apply }), setCjResult, setCjLoading, apply ? 'CronJob deployed' : 'CronJob YAML generated');
+  const handleDS = (apply: boolean) => run(() => api.persist.daemonset({ ...base, namespace: dsNs, name: dsName, image: dsImg, mount_path: dsMount, command: dsCmd, apply }), setDsResult, setDsLoading, apply ? 'DaemonSet deployed' : 'DaemonSet YAML generated');
   const handleKC = () => run(() => api.persist.kubeconfig({ server: kcServer || base.target_host || '', cluster: kcCluster, token: kcToken || base.token || '' }), setKcResult, setKcLoading, 'Kubeconfig generated');
   const handleHost = () => run(() => api.persist.hostCrontab({ lhost: hLhost, lport: hLport }), setHResult, setHLoading, 'Host persistence generated');
 
-  return (
-    <Tabs defaultActiveKey="sa" size="small">
-      <Tabs.TabPane tab="服务Account" key="sa">
+  const tabItems = [
+    {
+      key: 'sa',
+      label: '服务Account',
+      children: (
         <Card size="small">
           <Space direction="vertical" style={{ width: '100%' }}>
             <Space><Input addonBefore="命名空间" value={saNs} onChange={e => setSaNs(e.target.value)} style={{ width: 150 }} /><Input addonBefore="名称" value={saName} onChange={e => setSaName(e.target.value)} style={{ width: 140 }} /><Input addonBefore="绑定" value={saBind} onChange={e => setSaBind(e.target.value)} style={{ width: 140 }} /></Space>
@@ -92,36 +94,52 @@ export default function PersistTab({ getAuth, addLog, activeTarget }: Props) {
             <ResultView result={saResult} loading={saLoading} emptyHint="创建 cluster-admin ServiceAccount 并获取 Token" />
           </Space>
         </Card>
-      </Tabs.TabPane>
-      <Tabs.TabPane tab="CronJob" key="cj">
+      ),
+    },
+    {
+      key: 'cj',
+      label: 'CronJob',
+      children: (
         <Card size="small">
           <Space direction="vertical" style={{ width: '100%' }}>
             <Space wrap><Input addonBefore="命名空间" value={cjNs} onChange={e => setCjNs(e.target.value)} style={{ width: 130 }} /><Input addonBefore="名称" value={cjName} onChange={e => setCjName(e.target.value)} style={{ width: 130 }} /><Input addonBefore="镜像" value={cjImg} onChange={e => setCjImg(e.target.value)} style={{ width: 120 }} /><Input addonBefore="周期" value={cjSched} onChange={e => setCjSched(e.target.value)} style={{ width: 130 }} /></Space>
             <Input addonBefore="命令" value={cjCmd} onChange={e => setCjCmd(e.target.value)} />
             <Space>
-              <Button type="primary" onClick={handleCJ} loading={cjLoading}>生成并部署</Button>
+              <Button onClick={() => handleCJ(false)} loading={cjLoading}>仅生成 YAML</Button>
+              <Button type="primary" onClick={() => handleCJ(true)} loading={cjLoading}>生成并部署</Button>
               {cjResult?.applied && <Tag color="green">{cjResult.applied}</Tag>}
+              {cjResult?.preview && <Tag color="blue">仅生成</Tag>}
               {cjResult?.error && <Tag color="red">错误: {cjResult.error}</Tag>}
             </Space>
             <ResultView result={cjResult} loading={cjLoading} emptyHint="创建定时CronJob后门，周期性执行命令" />
           </Space>
         </Card>
-      </Tabs.TabPane>
-      <Tabs.TabPane tab="DaemonSet" key="ds">
+      ),
+    },
+    {
+      key: 'ds',
+      label: 'DaemonSet',
+      children: (
         <Card size="small">
           <Space direction="vertical" style={{ width: '100%' }}>
             <Space wrap><Input addonBefore="命名空间" value={dsNs} onChange={e => setDsNs(e.target.value)} style={{ width: 130 }} /><Input addonBefore="名称" value={dsName} onChange={e => setDsName(e.target.value)} style={{ width: 130 }} /><Input addonBefore="镜像" value={dsImg} onChange={e => setDsImg(e.target.value)} style={{ width: 120 }} /></Space>
             <Space><Input addonBefore="挂载" value={dsMount} onChange={e => setDsMount(e.target.value)} style={{ width: 160 }} /><Input addonBefore="命令" value={dsCmd} onChange={e => setDsCmd(e.target.value)} style={{ width: 280 }} /></Space>
             <Space>
-              <Button type="primary" onClick={handleDS} loading={dsLoading}>生成并部署</Button>
+              <Button onClick={() => handleDS(false)} loading={dsLoading}>仅生成 YAML</Button>
+              <Button type="primary" onClick={() => handleDS(true)} loading={dsLoading}>生成并部署</Button>
               {dsResult?.applied && <Tag color="green">{dsResult.applied}</Tag>}
+              {dsResult?.preview && <Tag color="blue">仅生成</Tag>}
               {dsResult?.error && <Tag color="red">错误: {dsResult.error}</Tag>}
             </Space>
             <ResultView result={dsResult} loading={dsLoading} emptyHint="创建特权DaemonSet后门，在所有节点运行" />
           </Space>
         </Card>
-      </Tabs.TabPane>
-      <Tabs.TabPane tab="Kubeconfig" key="kc">
+      ),
+    },
+    {
+      key: 'kc',
+      label: 'Kubeconfig',
+      children: (
         <Card size="small">
           <Space direction="vertical" style={{ width: '100%' }}>
             <Space><Input addonBefore="服务器" value={kcServer} onChange={e => setKcServer(e.target.value)} placeholder="host:6443" style={{ width: 250 }} /><Input addonBefore="集群" value={kcCluster} onChange={e => setKcCluster(e.target.value)} style={{ width: 150 }} /></Space>
@@ -130,8 +148,12 @@ export default function PersistTab({ getAuth, addLog, activeTarget }: Props) {
             <ResultView result={kcResult} loading={kcLoading} emptyHint="输入服务器地址和Token生成kubeconfig" />
           </Space>
         </Card>
-      </Tabs.TabPane>
-      <Tabs.TabPane tab="Host" key="host">
+      ),
+    },
+    {
+      key: 'host',
+      label: 'Host',
+      children: (
         <Card size="small">
           <Space direction="vertical" style={{ width: '100%' }}>
             <Space><Input addonBefore="LHOST" value={hLhost} onChange={e => setHLhost(e.target.value)} style={{ width: 170 }} /><Input addonBefore="LPORT" value={hLport} onChange={e => setHLport(e.target.value)} style={{ width: 120 }} /></Space>
@@ -139,7 +161,9 @@ export default function PersistTab({ getAuth, addLog, activeTarget }: Props) {
             <ResultView result={hResult} loading={hLoading} emptyHint="生成主机级别的持久化脚本（crontab反弹shell等）" />
           </Space>
         </Card>
-      </Tabs.TabPane>
-    </Tabs>
-  );
+      ),
+    },
+  ];
+
+  return <Tabs defaultActiveKey="sa" size="small" items={tabItems} />;
 }

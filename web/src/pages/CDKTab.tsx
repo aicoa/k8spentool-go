@@ -31,13 +31,24 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
   const [evalNs, setEvalNs] = useState('');
   const [evalPod, setEvalPod] = useState('');
   const [evalPods, setEvalPods] = useState<any[]>([]);
+  const [evalPodsNamespace, setEvalPodsNamespace] = useState('');
+  const [evalPodsLoaded, setEvalPodsLoaded] = useState(false);
   const [evalPodsLoading, setEvalPodsLoading] = useState(false);
 
   useEffect(() => {
-    if (!sharedPodSelection) return;
+    if (!sharedPodSelection) {
+      setEvalPod('');
+      return;
+    }
     setEvalNs(sharedPodSelection.namespace || 'default');
     setEvalPod(sharedPodSelection.name || '');
   }, [sharedPodSelection?.namespace, sharedPodSelection?.name, activeTarget]);
+
+  useEffect(() => {
+    setEvalPods([]);
+    setEvalPodsNamespace('');
+    setEvalPodsLoaded(false);
+  }, [activeTarget]);
 
   const run = async (fn: () => Promise<any>, label: string, phase: 'info' | 'access' | 'escape' | 'persist' | 'lateral' = 'escape') => {
     setLoading(true); setResult(null);
@@ -56,6 +67,8 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
       const r = await api.exec.apiListPods({ ...t, namespace: evalNs });
       const pods = Array.isArray(r?.pods) ? r.pods : [];
       setEvalPods(pods);
+      setEvalPodsNamespace(evalNs.trim());
+      setEvalPodsLoaded(true);
       onUpdateSharedPods(pods, r?.source === 'kubelet' ? 'kubelet' : 'api-server', {
         namespaceFilter: evalNs || '',
         autoSelectFirst: !sharedPodSelection,
@@ -77,6 +90,8 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
       addLog(`[CDK] loaded ${pods.length} pods for evaluate`);
     } catch (e) {
       setEvalPods([]);
+      setEvalPodsNamespace('');
+      setEvalPodsLoaded(false);
       addLog(`[CDK] load evaluate pods failed: ${e}`);
     } finally {
       setEvalPodsLoading(false);
@@ -85,19 +100,27 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
 
   const sharedPodSourceLabel = sharedPodSource === 'kubelet' ? 'Kubelet' : sharedPodSource === 'kubectl' ? 'kubectl' : 'API Server';
   const availableEvalPods = useMemo(() => {
-    const sourcePods = evalPods.length > 0 ? evalPods : sharedPods;
+    const sourcePods = evalPodsLoaded && evalPodsNamespace === evalNs.trim() ? evalPods : sharedPods;
     const namespaceFilter = evalNs.trim();
     return sourcePods.filter((item: any) => !namespaceFilter || (item.namespace || 'default') === namespaceFilter);
-  }, [evalPods, sharedPods, evalNs]);
-  const evalSelectValue = evalPod ? `${evalNs || sharedPodSelection?.namespace || 'default'}/${evalPod}` : undefined;
+  }, [evalPods, evalPodsLoaded, evalPodsNamespace, sharedPods, evalNs]);
+  const effectiveEvalNamespace = useMemo(() => {
+    if (evalNs.trim()) return evalNs.trim();
+    if (sharedPodSelection?.name === evalPod && (sharedPodSelection.namespace || '').trim()) {
+      return sharedPodSelection.namespace.trim();
+    }
+    const matchedPod = availableEvalPods.find((item: any) => item.name === evalPod);
+    return matchedPod?.namespace || 'default';
+  }, [availableEvalPods, evalNs, evalPod, sharedPodSelection?.name, sharedPodSelection?.namespace]);
+  const evalSelectValue = evalPod ? `${effectiveEvalNamespace}/${evalPod}` : undefined;
   const selectedEvalContainer = useMemo(() => {
-    const targetNamespace = evalNs || sharedPodSelection?.namespace || 'default';
+    const targetNamespace = effectiveEvalNamespace;
     if (sharedPodSelection?.name === evalPod && (sharedPodSelection.namespace || 'default') === targetNamespace) {
       return sharedPodSelection.container || '';
     }
     const matchedPod = availableEvalPods.find((item: any) => item.name === evalPod && (item.namespace || 'default') === targetNamespace);
     return matchedPod?.containers?.split(',').map((entry: string) => entry.trim()).filter(Boolean)[0] || '';
-  }, [availableEvalPods, evalNs, evalPod, sharedPodSelection?.container, sharedPodSelection?.name, sharedPodSelection?.namespace]);
+  }, [availableEvalPods, effectiveEvalNamespace, evalPod, sharedPodSelection?.container, sharedPodSelection?.name, sharedPodSelection?.namespace]);
 
   return (<div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
     <Card title={<span><KeyOutlined /> 凭据获取</span>} size="small"><Space direction="vertical" style={{ width: '100%' }}>
@@ -157,7 +180,7 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
         />
       )}
       <Button disabled={!evalPod} onClick={() => {
-        const targetNs = sharedPodSelection?.namespace || evalNs || 'default';
+        const targetNs = effectiveEvalNamespace;
         const targetContainer = selectedEvalContainer || undefined;
         onSelectSharedPod({ namespace: targetNs, name: evalPod, container: targetContainer });
         run(() => api.cdk.evaluatePod({

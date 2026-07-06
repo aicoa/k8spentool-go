@@ -122,6 +122,8 @@ func (h *ExecHandler) EnumSATokens(c *gin.Context) {
 		TargetHost string `json:"target_host" binding:"required"`
 		Namespace  string `json:"namespace"`
 		Token      string `json:"token"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
 		TimeoutSec int    `json:"timeout_sec"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
@@ -140,7 +142,7 @@ func (h *ExecHandler) EnumSATokens(c *gin.Context) {
 	// Add fieldSelector for SA tokens
 	url += "?fieldSelector=type=kubernetes.io/service-account-token"
 
-	code, body, err := util.SendRequest(url, "GET", req.Token, req.TimeoutSec, req.SkipTLS)
+	code, body, err := util.SendRequestWithAuth(url, "GET", req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -153,6 +155,8 @@ func (h *ExecHandler) KubeletListPods(c *gin.Context) {
 	var req struct {
 		TargetHost string `json:"target_host" binding:"required"`
 		Token      string `json:"token"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
 		TimeoutSec int    `json:"timeout_sec"`
 		SkipTLS    bool   `json:"skip_tls"`
 	}
@@ -163,8 +167,8 @@ func (h *ExecHandler) KubeletListPods(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := "https://" + req.TargetHost + ":10250/pods"
-	code, body, err := util.SendRequest(url, "GET", req.Token, req.TimeoutSec, req.SkipTLS)
+	url := kubectl.TargetServiceURL(req.TargetHost, "https", 10250, "/pods")
+	code, body, err := util.SendRequestWithAuth(url, "GET", req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -204,6 +208,8 @@ func (h *ExecHandler) KubeletExec(c *gin.Context) {
 		ContainerName string `json:"container_name"`
 		Command       string `json:"command" binding:"required"`
 		Token         string `json:"token"`
+		Username      string `json:"username"`
+		Password      string `json:"password"`
 		TimeoutSec    int    `json:"timeout_sec"`
 		SkipTLS       bool   `json:"skip_tls"`
 	}
@@ -217,13 +223,12 @@ func (h *ExecHandler) KubeletExec(c *gin.Context) {
 	if req.TimeoutSec == 0 {
 		req.TimeoutSec = 10
 	}
-	url := fmt.Sprintf("https://%s:10250/run/%s/%s",
-		req.TargetHost, req.Namespace, req.PodName)
+	url := kubectl.TargetServiceURL(req.TargetHost, "https", 10250, fmt.Sprintf("/run/%s/%s", req.Namespace, req.PodName))
 	if req.ContainerName != "" {
 		url += "/" + req.ContainerName
 	}
-	code, body, err := util.SendPost(url, encodeKubeletCommandForm(req.Command),
-		"application/x-www-form-urlencoded", req.Token, req.TimeoutSec, req.SkipTLS)
+	code, body, err := util.SendPostWithAuth(url, encodeKubeletCommandForm(req.Command),
+		"application/x-www-form-urlencoded", req.Token, req.Username, req.Password, req.TimeoutSec, req.SkipTLS)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return

@@ -38,17 +38,7 @@ func (c *Client) ApplyYAML(ctx context.Context, yamlContent string) (string, err
 			return "", fmt.Errorf("YAML missing apiVersion/kind")
 		}
 
-		// GVR mapping
-		resourceMap := map[string]string{
-			"Pod": "pods", "Service": "services", "Secret": "secrets", "ConfigMap": "configmaps",
-			"ServiceAccount": "serviceaccounts", "Deployment": "deployments", "DaemonSet": "daemonsets",
-			"CronJob": "cronjobs", "Job": "jobs", "ClusterRoleBinding": "clusterrolebindings",
-			"ClusterRole": "clusterroles", "RoleBinding": "rolebindings", "Role": "roles",
-		}
-		resource := resourceMap[gvk.Kind]
-		if resource == "" {
-			resource = strings.ToLower(gvk.Kind) + "s"
-		}
+		resource := resourceForKind(gvk.Kind)
 
 		ns := obj.GetNamespace()
 		dr := dynamicClient.Resource(gvk.GroupVersion().WithResource(resource)).Namespace(ns)
@@ -249,6 +239,9 @@ func BuildBackdoorPod(name, namespace, image, mountPath, nodeName string) *corev
 				},
 			}},
 		},
+	}
+	if strings.TrimSpace(nodeName) != "" {
+		pod.Spec.NodeName = strings.TrimSpace(nodeName)
 	}
 	return pod
 }

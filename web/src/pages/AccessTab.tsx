@@ -31,7 +31,12 @@ export default function AccessTab({ getAuth, addLog, activeTarget, onOpenDashboa
   const [kubeconfigContent, setKubeconfigContent] = useState('');
 
   useEffect(() => {
-    if (!sharedPodSelection) return;
+    if (!sharedPodSelection) {
+      setKubeletNs('default');
+      setKubeletPod('');
+      setKubeletContainer('');
+      return;
+    }
     setKubeletNs(sharedPodSelection.namespace || 'default');
     setKubeletPod(sharedPodSelection.name || '');
     if (sharedPodSelection.container !== undefined) {
@@ -43,14 +48,29 @@ export default function AccessTab({ getAuth, addLog, activeTarget, onOpenDashboa
     setLoading(true); setResult(null);
     try {
       const r = await fn();
+      const denied = r && typeof r.accessible === 'boolean' && r.accessible === false;
+      const reachable = r && typeof r.reachable === 'boolean' ? r.reachable : undefined;
+      const statusCode = typeof r?.status_code === 'number' ? r.status_code : undefined;
+      const success = !r?.error && !denied;
+      const summary = r?.error
+        ? `${label} failed: ${r.error}`
+        : denied
+          ? `${label} denied${statusCode ? ` (HTTP ${statusCode})` : ''}`
+          : `${label} succeeded`;
       setResult(r);
-      addLog(r?.error ? `[-] ${label} failed: ${r.error}` : `[+] ${label} succeeded`);
+      addLog(
+        r?.error
+          ? `[-] ${label} failed: ${r.error}`
+          : denied
+            ? `${reachable ? '[!]' : '[-]'} ${label} denied${statusCode ? ` (HTTP ${statusCode})` : ''}`
+            : `[+] ${label} succeeded`
+      );
       recordTargetStep(activeTarget, {
         phase: 'access',
         tool: 'access',
         action: label,
-        success: !r?.error,
-        summary: r?.error ? `${label} failed: ${r.error}` : `${label} succeeded`,
+        success,
+        summary,
         data: r,
         output: r?.output || r?.body,
         error: r?.error,
