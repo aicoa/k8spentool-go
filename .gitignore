@@ -27,4 +27,5 @@ Thumbs.db
 *.log
 tmp/
 .gocache/
+.cache/
 .k8spen/

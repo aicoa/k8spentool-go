@@ -43,6 +43,10 @@ func (h *InfoHandler) RunProfile(c *gin.Context) {
 		Password   string `json:"password"`
 		TimeoutSec int    `json:"timeout_sec"`
 		SkipTLS    bool   `json:"skip_tls"`
+		Mode       string `json:"mode"`
+		Namespace  string `json:"namespace"`
+		PodName    string `json:"pod_name"`
+		Container  string `json:"container"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -61,6 +65,10 @@ func (h *InfoHandler) RunProfile(c *gin.Context) {
 		Password:   req.Password,
 		SkipTLS:    req.SkipTLS,
 		TimeoutSec: req.TimeoutSec,
+		Mode:       req.Mode,
+		Namespace:  req.Namespace,
+		PodName:    req.PodName,
+		Container:  req.Container,
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)

@@ -371,23 +371,19 @@ func (h *AIHandler) Chat(c *gin.Context) {
 	outcome, err := h.runToolLoop(ctx, session, tools, llm)
 
 	if err != nil {
-		log.Printf("[AI] LLM error: %v, using fallback", err)
-		fallback := AIHistoryEntry{
-			Role:      "assistant",
-			Content:   fallbackResponse(req.Message),
-			Timestamp: time.Now(),
-		}
+		log.Printf("[AI] LLM error: %v", err)
 		session.mu.Lock()
-		session.Messages = append(session.Messages, ai.Message{Role: "assistant", Content: fallback.Content})
-		session.History = append(session.History, fallback)
-		session.Status = "active"
+		session.Status = "llm_error"
+		pending := append([]PendingToolAction(nil), session.PendingActions...)
 		session.mu.Unlock()
 		h.saveSession(session)
-		c.JSON(http.StatusOK, gin.H{
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":           "llm_unavailable",
+			"message":         err.Error(),
 			"session_id":      id,
-			"response":        fallback,
+			"status":          "llm_error",
 			"tool_traces":     []ai.ToolTrace{},
-			"pending_actions": session.PendingActions,
+			"pending_actions": pending,
 		})
 		return
 	}

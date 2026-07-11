@@ -2,6 +2,8 @@ package handler
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -43,6 +45,24 @@ func TestBuildClusterIPMITMYAML(t *testing.T) {
 	}
 	if !strings.Contains(yaml, "traffic destined for 8.8.8.8:8443") {
 		t.Fatalf("expected yaml comment to describe victim traffic, got:\n%s", yaml)
+	}
+}
+
+func TestCDKPluginsAreRegistered(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewCDKHandler()
+	router := gin.New()
+	router.GET("/cdk/plugins", handler.ListPlugins)
+
+	req := httptest.NewRequest(http.MethodGet, "/cdk/plugins", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "cdk.clusterip-mitm") || !strings.Contains(rec.Body.String(), "cdk.escape-pod") {
+		t.Fatalf("expected cdk plugin registry to expose built-in tactics, got %s", rec.Body.String())
 	}
 }
 

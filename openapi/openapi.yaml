@@ -632,7 +632,7 @@ paths:
   /exec/port-forward:
     post:
       tags: [Exec]
-      summary: Generate port-forward and tunnel instructions for a pod
+      summary: Start a managed API-server port-forward session for a pod
       requestBody:
         required: true
         content:
@@ -641,7 +641,29 @@ paths:
               $ref: '#/components/schemas/PortForwardRequest'
       responses:
         '200':
-          description: Port-forward guidance
+          description: Port-forward session or preview guidance
+
+  /exec/port-forward/sessions:
+    get:
+      tags: [Exec]
+      summary: List managed port-forward sessions
+      responses:
+        '200':
+          description: Active port-forward sessions
+
+  /exec/port-forward/{id}:
+    delete:
+      tags: [Exec]
+      summary: Stop a managed port-forward session
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session stopped
 
   # Persist
   /persist/service-account:
@@ -1434,6 +1456,35 @@ paths:
       responses:
         '200':
           description: Extracted Dashboard tokens
+
+  /cdk/plugins:
+    get:
+      tags: [CDK]
+      summary: List registered CDK exploit plugins
+      responses:
+        '200':
+          description: CDK plugin registry
+
+  /cdk/plugins/{name}/run:
+    post:
+      tags: [CDK]
+      summary: Run a registered CDK exploit plugin
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Plugin execution result
 
   /cdk/configmaps:
     post:

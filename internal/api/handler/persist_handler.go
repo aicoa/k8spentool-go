@@ -311,7 +311,7 @@ contexts:
   name: %[2]s
 users:
 - name: admin
- user:
+  user:
     token: %[3]s
 `, server, req.Cluster, req.Token)
 	c.JSON(http.StatusOK, gin.H{"kubeconfig": kcfg})

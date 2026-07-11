@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -131,5 +132,46 @@ func TestGenerateKubeconfigDoesNotDoublePrefixHTTPS(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "server: https://demo.local:6443") {
 		t.Fatalf("expected normalized kubeconfig server, got %s", rec.Body.String())
+	}
+}
+
+func TestGenerateKubeconfigProducesValidUserEntry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := NewPersistHandler()
+	router := gin.New()
+	router.POST("/persist/kubeconfig", handler.GenerateKubeconfig)
+
+	req := httptest.NewRequest(http.MethodPost, "/persist/kubeconfig", strings.NewReader(`{
+		"server":"demo.local",
+		"cluster":"demo",
+		"token":"abc"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Kubeconfig string `json:"kubeconfig"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	var cfg struct {
+		Users []struct {
+			Name string `yaml:"name"`
+			User struct {
+				Token string `yaml:"token"`
+			} `yaml:"user"`
+		} `yaml:"users"`
+	}
+	if err := yaml.Unmarshal([]byte(body.Kubeconfig), &cfg); err != nil {
+		t.Fatalf("kubeconfig should parse as yaml: %v\n%s", err, body.Kubeconfig)
+	}
+	if len(cfg.Users) != 1 || cfg.Users[0].Name != "admin" || cfg.Users[0].User.Token != "abc" {
+		t.Fatalf("expected users[0].user.token to be populated, got %#v", cfg.Users)
 	}
 }

@@ -187,6 +187,8 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 			exec.POST("/reverse-shell/generate", execH.GenerateRevShell)
 			exec.POST("/upload-file", execH.UploadFile)
 			exec.POST("/port-forward", execH.PortForwardInfo)
+			exec.GET("/port-forward/sessions", execH.ListPortForwards)
+			exec.DELETE("/port-forward/:id", execH.StopPortForward)
 		}
 
 		// Persist
@@ -260,6 +262,8 @@ func SetupRouter(hub *ws.Hub) *gin.Engine {
 		// CDK Tactics
 		cdk := v1.Group("/cdk")
 		{
+			cdk.GET("/plugins", cdkH.ListPlugins)
+			cdk.POST("/plugins/:name/run", cdkH.RunPlugin)
 			cdk.POST("/configmaps", cdkH.DumpConfigMaps)
 			cdk.POST("/psp", cdkH.DumpPSP)
 			cdk.POST("/docker-api", cdkH.CheckDockerAPI)
