@@ -593,12 +593,13 @@ func (h *ExecHandler) PortForwardInfo(c *gin.Context) {
 	h.portForwards.Add(session)
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":    true,
-		"session":    session.PortForwardSession,
-		"command":    command,
-		"local_url":  fmt.Sprintf("http://127.0.0.1:%d", localPort),
-		"stop_api":   fmt.Sprintf("DELETE /api/v1/exec/port-forward/%s", session.ID),
-		"status_api": "GET /api/v1/exec/port-forward/sessions",
+		"success":           true,
+		"session":           session.PortForwardSession,
+		"command":           command,
+		"backend_local_url": fmt.Sprintf("http://127.0.0.1:%d", localPort),
+		"access_note":       "The forwarded socket listens on the K8sPenTool-ng backend host. It is directly reachable only when the browser runs on that same host or a separate tunnel exposes it.",
+		"stop_api":          fmt.Sprintf("DELETE /api/v1/exec/port-forward/%s", session.ID),
+		"status_api":        "GET /api/v1/exec/port-forward/sessions",
 	})
 }
 

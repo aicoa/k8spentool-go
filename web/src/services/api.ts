@@ -168,6 +168,8 @@ export const api = {
     reverseShell: (data: object) => post('/exec/reverse-shell/generate', data),
     uploadFile: (data: object) => post('/exec/upload-file', data),
     portForward: (data: object) => post('/exec/port-forward', data),
+    listPortForwards: () => get('/exec/port-forward/sessions'),
+    stopPortForward: (id: string) => request(`/exec/port-forward/${id}`, { method: 'DELETE' }),
   },
   persist: {
     createSA: (data: object) => post('/persist/service-account', data),
@@ -224,6 +226,8 @@ export const api = {
     updateConfig: (data: { provider?: string; model?: string; api_key?: string; base_url?: string; clear_api_key?: boolean }) => request('/ai/config', { method: 'PUT', body: JSON.stringify(data) }),
   },
   cdk: {
+    plugins: () => get('/cdk/plugins'),
+    runPlugin: (name: string, data: object) => post(`/cdk/plugins/${encodeURIComponent(name)}/run`, data),
     configmaps: (data: object) => post('/cdk/configmaps', data),
     psp: (data: object) => post('/cdk/psp', data),
     dockerAPI: (data: object) => post('/cdk/docker-api', data),

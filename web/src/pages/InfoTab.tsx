@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Button, Card, Input, Space, Table, Typography, Spin } from 'antd';
+import React, { useEffect, useState } from 'react';
+import { Button, Card, Input, Select, Space, Table, Typography, Spin } from 'antd';
 import { api, targetParams, recordTargetStep } from '../services/api';
 import ResultView from '../components/ResultView';
 
@@ -15,6 +15,9 @@ export default function InfoTab({ getAuth, addLog, activeTarget }: Props) {
   const [capHex, setCapHex] = useState('');
   const [capResult, setCapResult] = useState<any>(null);
   const [portScanResult, setPortScanResult] = useState<any>(null);
+  const [profiles, setProfiles] = useState<any[]>([]);
+  const [profileID, setProfileID] = useState('basic');
+  const [profileResult, setProfileResult] = useState<any>(null);
   const [capLoading, setCapLoading] = useState(false);
   const [loadingStates, setLoadingStates] = useState<Record<string, boolean>>({});
 
@@ -80,6 +83,34 @@ export default function InfoTab({ getAuth, addLog, activeTarget }: Props) {
     finally { setLoading('scan', false); }
   };
 
+  useEffect(() => {
+    api.info.profiles().then((r: any) => {
+      const items = Array.isArray(r) ? r : [];
+      setProfiles(items);
+      if (items.length > 0 && !items.some((item: any) => item.id === profileID)) setProfileID(items[0].id);
+    }).catch((e) => addLog('[-] 评估配置加载失败: ' + e));
+  }, []);
+
+  const runProfile = async () => {
+    setLoading('profile', true);
+    try {
+      const r = await api.info.runProfile(profileID, {
+        ...targetParams(getAuth()),
+        mode: 'remote-k8s',
+      });
+      setProfileResult(r);
+      addLog(r?.error ? `[-] ${profileID} 评估失败: ${r.error}` : `[+] ${profileID} 评估完成`);
+      recordTargetStep(activeTarget, {
+        phase: 'info', tool: 'info/evaluate', action: `Run ${profileID} profile`,
+        success: !r?.error, summary: r?.error ? `Profile failed: ${r.error}` : 'Profile evaluation completed',
+        data: r, error: r?.error,
+      }).catch(() => {});
+    } catch (e) {
+      setProfileResult({ error: String(e) });
+      addLog('[-] 评估执行失败: ' + e);
+    } finally { setLoading('profile', false); }
+  };
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
       <Card title="环境检测" size="small" extra={<Button onClick={loadEnv} size="small" loading={loadingStates['env']}>加载</Button>}>
@@ -130,6 +161,19 @@ export default function InfoTab({ getAuth, addLog, activeTarget }: Props) {
           <Button onClick={portScan} loading={loadingStates['scan']}>扫描 {getAuth().host} 常用端口</Button>
           <Typography.Text style={{ fontSize: 10, color: '#888' }}>使用配置的目标地址进行端口扫描</Typography.Text>
           <ResultView result={portScanResult} emptyHint="执行端口扫描查看结果" />
+        </Space>
+      </Card>
+      <Card title="目标评估" size="small">
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Space>
+            <Select value={profileID} onChange={setProfileID} style={{ width: 180 }}
+              options={profiles.map((profile: any) => ({ value: profile.id, label: `${profile.name} (${profile.checks})` }))} />
+            <Button onClick={runProfile} loading={loadingStates['profile']} disabled={!profileID}>运行评估</Button>
+          </Space>
+          <Typography.Text style={{ fontSize: 10, color: '#888' }}>
+            此模式从控制端检查目标 API、Kubelet 与 Etcd 暴露面；容器本地检查会明确标记为跳过。
+          </Typography.Text>
+          <ResultView result={profileResult} loading={loadingStates['profile']} emptyHint="选择评估配置并运行" />
         </Space>
       </Card>
     </div>

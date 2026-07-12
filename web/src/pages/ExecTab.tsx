@@ -32,6 +32,7 @@ export default function ExecTab({ getAuth, addLog, activeTarget, sharedPods, sha
   const [uploadRemotePath, setUploadRemotePath] = useState('');
   const [podListExpanded, setPodListExpanded] = useState(false);
   const [podSearch, setPodSearch] = useState('');
+  const [portForwardSessions, setPortForwardSessions] = useState<any[]>([]);
 
   useEffect(() => {
     if (!sharedPodSelection) {
@@ -46,6 +47,24 @@ export default function ExecTab({ getAuth, addLog, activeTarget, sharedPods, sha
       setContainer(sharedPodSelection.container || '');
     }
   }, [sharedPodSelection?.namespace, sharedPodSelection?.name, sharedPodSelection?.container, activeTarget]);
+
+  const loadPortForwardSessions = async () => {
+    try {
+      const r = await api.exec.listPortForwards();
+      setPortForwardSessions(Array.isArray(r?.sessions) ? r.sessions : []);
+    } catch (e) { addLog('[-] 端口转发会话加载失败: ' + e); }
+  };
+
+  useEffect(() => { loadPortForwardSessions(); }, []);
+
+  const stopPortForward = async (id: string) => {
+    try {
+      const r = await api.exec.stopPortForward(id);
+      if (r?.error) throw new Error(r.error);
+      await loadPortForwardSessions();
+      addLog(`[+] 已停止端口转发: ${id}`);
+    } catch (e) { addLog(`[-] 停止端口转发失败: ${e}`); }
+  };
 
   const run = async (fn: () => Promise<any>, label: string, cachePods?: boolean) => {
     setLoading(true);
@@ -265,17 +284,31 @@ export default function ExecTab({ getAuth, addLog, activeTarget, sharedPods, sha
             }}>
               上传文件到 Pod
             </Button>
-            <Button onClick={() => {
+            <Button onClick={async () => {
               if (pod.trim()) onSelectSharedPod({ namespace: ns || 'default', name: pod.trim(), container: container.trim() || undefined });
-              run(() => api.exec.portForward({ ...t, namespace: ns, pod_name: pod, pod_port: 8080 }), 'Port forward info');
+              await run(() => api.exec.portForward({ ...t, namespace: ns, pod_name: pod, pod_port: 8080 }), 'Start port forward');
+              await loadPortForwardSessions();
             }}>
-              端口转发帮助
+              启动端口转发
             </Button>
           </Space>
           <Text type="secondary" style={{ fontSize: 10 }}>
             将本地文件（如 chisel、frp 代理程序、CDK 二进制）通过 tar+SPDY 协议上传到 Pod。
             上传后到「API服务器执行」中 chmod +x 并运行。
           </Text>
+        </Space>
+      </Card>
+      <Card title="端口转发会话" size="small">
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Button size="small" onClick={loadPortForwardSessions}>刷新会话</Button>
+          {portForwardSessions.length === 0 ? <Text type="secondary" style={{ fontSize: 11 }}>没有受管端口转发会话</Text> :
+            portForwardSessions.map((session) => (
+              <div key={session.id} style={{ borderBottom: '1px solid #eee', paddingBottom: 6 }}>
+                <Text code>{session.namespace}/{session.pod_name} {session.local_port}:{session.pod_port}</Text>
+                <Button danger size="small" style={{ marginLeft: 8 }} onClick={() => stopPortForward(session.id)}>停止</Button>
+              </div>
+            ))}
+          <Text type="secondary" style={{ fontSize: 10 }}>监听端口位于 K8sPenTool-ng 后端所在主机，不一定是当前浏览器主机。</Text>
         </Space>
       </Card>
       <Card title="Backdoor Pod Generator" size="small">

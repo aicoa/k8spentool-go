@@ -859,17 +859,100 @@ func (h *AIHandler) ApproveStep(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "no plan"})
 		return
 	}
-
-	session.mu.Lock()
-	defer session.mu.Unlock()
-
-	if req.StepIndex >= 0 && req.StepIndex < len(session.Plan.Steps) {
-		session.Plan.Steps[req.StepIndex].Status = "completed"
-		session.Plan.CurrentStep = req.StepIndex + 1
+	if !h.hydrateSessionAuth(session) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "session auth credentials not available. Please create a new session."})
+		return
 	}
 
+	session.mu.Lock()
+	if req.StepIndex < 0 || req.StepIndex >= len(session.Plan.Steps) {
+		session.mu.Unlock()
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid plan step index"})
+		return
+	}
+	step := session.Plan.Steps[req.StepIndex]
+	session.Plan.Steps[req.StepIndex].Status = "running"
+	session.mu.Unlock()
+
+	call, supported := planStepToolCall(step)
+	if !supported {
+		result := &engine.StepResult{
+			ID: uuid.New().String(), Phase: step.Phase, Tool: step.Tool, Action: step.Action,
+			Success: false, Summary: "No executable dispatcher mapping for this plan step; run it manually from the corresponding workspace.",
+			Timestamp: time.Now(),
+		}
+		session.mu.Lock()
+		session.Plan.Steps[req.StepIndex].Status = "skipped"
+		session.Plan.Steps[req.StepIndex].Result = result
+		session.Plan.CurrentStep = req.StepIndex + 1
+		session.mu.Unlock()
+		h.saveSession(session)
+		c.JSON(http.StatusOK, session.Plan)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	startedAt := time.Now()
+	dispatchResult := ai.Dispatch(ctx, call, session.Auth)
+	stepResult := planDispatchStepResult(step, dispatchResult, time.Since(startedAt))
+
+	session.mu.Lock()
+	session.Plan.Steps[req.StepIndex].Result = stepResult
+	if stepResult.Success {
+		session.Plan.Steps[req.StepIndex].Status = "completed"
+	} else {
+		session.Plan.Steps[req.StepIndex].Status = "failed"
+	}
+	session.Plan.CurrentStep = req.StepIndex + 1
+	session.History = append(session.History, AIHistoryEntry{Role: "tool", Content: dispatchResult.Output, ToolCallID: call.ID, Timestamp: time.Now()})
+	session.mu.Unlock()
 	h.saveSession(session)
 	c.JSON(http.StatusOK, session.Plan)
+}
+
+// planStepToolCall intentionally exposes only read-only collection and access checks.
+// Destructive plan entries remain explicit workspace actions rather than implicit automation.
+func planStepToolCall(step engine.PlanStep) (ai.ToolCall, bool) {
+	toolName := map[string]string{
+		"scan_k8s_ports":    "info_port_scan",
+		"run_basic_profile": "info_run_evaluate",
+		"check_anonymous":   "access_apiserver",
+		"check_kubelet":     "access_kubelet",
+		"check_etcd":        "access_etcd_check",
+		"list_pods":         "exec_list_pods",
+		"discover_services": "lateral_discover_services",
+	}[step.Action]
+	if toolName == "" {
+		return ai.ToolCall{}, false
+	}
+	args := step.Parameters
+	if args == nil {
+		args = map[string]interface{}{}
+	}
+	if step.Action == "run_basic_profile" {
+		args["profile"] = "basic"
+	}
+	body, err := json.Marshal(args)
+	if err != nil {
+		return ai.ToolCall{}, false
+	}
+	return ai.ToolCall{ID: "plan-" + uuid.New().String(), Type: "function", Function: ai.FunctionCallArg{Name: toolName, Arguments: string(body)}}, true
+}
+
+func planDispatchStepResult(step engine.PlanStep, dispatched ai.DispatchResult, elapsed time.Duration) *engine.StepResult {
+	payload := ai.ToolResultPayload{}
+	_ = json.Unmarshal([]byte(dispatched.Output), &payload)
+	success := payload.OK && dispatched.Trace.Status != "error"
+	summary := payload.Summary
+	if summary == "" {
+		summary = dispatched.Trace.ResultPreview
+	}
+	return &engine.StepResult{
+		ID: uuid.New().String(), Phase: step.Phase, Tool: step.Tool, Action: step.Action,
+		Success: success, Summary: summary, Data: payload.Data, Output: dispatched.Output,
+		RiskLevel: engine.RiskInfo, Duration: elapsed.Milliseconds(), Timestamp: time.Now(), Error: payload.Error,
+	}
 }
 
 func (h *AIHandler) StopSession(c *gin.Context) {

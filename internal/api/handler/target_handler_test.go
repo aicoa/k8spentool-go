@@ -165,3 +165,16 @@ func TestListTargetsReturnsNewestFirst(t *testing.T) {
 		t.Fatalf("expected newest target first, got %#v", targets)
 	}
 }
+
+func TestTargetHostPort(t *testing.T) {
+	cases := map[string]int{
+		"cluster.local:8443":         8443,
+		"https://cluster.local:9443": 9443,
+		"cluster.local":              0,
+	}
+	for input, want := range cases {
+		if got := targetHostPort(input); got != want {
+			t.Fatalf("targetHostPort(%q) = %d, want %d", input, got, want)
+		}
+	}
+}

@@ -34,6 +34,8 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
   const [evalPodsNamespace, setEvalPodsNamespace] = useState('');
   const [evalPodsLoaded, setEvalPodsLoaded] = useState(false);
   const [evalPodsLoading, setEvalPodsLoading] = useState(false);
+  const [plugins, setPlugins] = useState<any[]>([]);
+  const [pluginsLoading, setPluginsLoading] = useState(false);
 
   useEffect(() => {
     if (!sharedPodSelection) {
@@ -49,6 +51,15 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
     setEvalPodsNamespace('');
     setEvalPodsLoaded(false);
   }, [activeTarget]);
+
+  const loadPlugins = async () => {
+    setPluginsLoading(true);
+    try {
+      const r = await api.cdk.plugins();
+      setPlugins(Array.isArray(r?.plugins) ? r.plugins : []);
+    } catch (e) { addLog(`[CDK] load plugins failed: ${e}`); }
+    finally { setPluginsLoading(false); }
+  };
 
   const run = async (fn: () => Promise<any>, label: string, phase: 'info' | 'access' | 'escape' | 'persist' | 'lateral' = 'escape') => {
     setLoading(true); setResult(null);
@@ -198,6 +209,23 @@ export default function CDKTab({ getAuth, addLog, activeTarget, sharedPods, shar
       <Button danger onClick={() => run(() => api.cdk.clusterIPMITM({ ...t, victim_ip: mitmIP || '1.1.1.1', target_ip: mitmIP || '1.1.1.1', target_port: mitmPort }), 'CVE-2020-8554 MITM', 'lateral')}>生成 CVE-2020-8554 MITM YAML</Button>
       <Text type="secondary" style={{ fontSize: 10 }}>CVE-2020-8554: 通过声明受害目标的 ExternalIP，把发往该 IP 的流量重定向到攻击者后端 Pod</Text>
     </Space></Card>
+
+    <Card title="CDK 插件" size="small" extra={<Button size="small" loading={pluginsLoading} onClick={loadPlugins}>加载</Button>}>
+      <Space direction="vertical" style={{ width: '100%' }}>
+        {plugins.length === 0 ? <Text type="secondary" style={{ fontSize: 11 }}>加载后可从统一插件注册表生成战术清单。</Text> : plugins.map((plugin) => (
+          <div key={plugin.name} style={{ borderBottom: '1px solid #eee', paddingBottom: 6 }}>
+            <Text strong style={{ fontSize: 11 }}>{plugin.name}</Text><br />
+            <Text type="secondary" style={{ fontSize: 10 }}>{plugin.description}</Text><br />
+            <Button size="small" style={{ marginTop: 4 }} onClick={() => {
+              const data = plugin.name === 'cdk.clusterip-mitm'
+                ? { victim_ip: mitmIP || '1.1.1.1', target_port: mitmPort }
+                : { escape_mode: escapeMode, namespace: escapeNs || 'default', command: escapeCmd || undefined };
+              run(() => api.cdk.runPlugin(plugin.name, data), `Run plugin ${plugin.name}`, plugin.name === 'cdk.clusterip-mitm' ? 'lateral' : 'escape');
+            }}>生成</Button>
+          </div>
+        ))}
+      </Space>
+    </Card>
 
     <Card title={<span><ContainerOutlined /> 逃逸 Pod 生成器 + 自动逃逸</span>} size="small" style={{ border: '2px solid #ff4d4f' }}><Space direction="vertical" style={{ width: '100%' }}>
       <Select value={escapeMode} onChange={setEscapeMode} style={{ width: '100%' }} options={em.map(m => ({ value: m.value, label: m.label }))} />

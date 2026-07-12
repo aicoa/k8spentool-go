@@ -2,10 +2,13 @@ package handler
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,6 +125,9 @@ func (h *TargetHandler) CreateTarget(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
 		return
 	}
+	if embeddedPort := targetHostPort(req.Host); embeddedPort != 0 {
+		req.Port = embeddedPort
+	}
 	// Auto-detect auth type from provided credentials
 	if req.AuthType == "" {
 		if req.Token != "" {
@@ -183,6 +189,28 @@ func (h *TargetHandler) CreateTarget(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, target)
+}
+
+// targetHostPort keeps stored target metadata aligned with host:port input while
+// preserving Host as entered for all existing request paths.
+func targetHostPort(host string) int {
+	value := strings.TrimSpace(host)
+	if value == "" {
+		return 0
+	}
+	if strings.Contains(value, "://") {
+		if parsed, err := url.Parse(value); err == nil {
+			if port, err := strconv.Atoi(parsed.Port()); err == nil {
+				return port
+			}
+		}
+		return 0
+	}
+	if _, port, err := net.SplitHostPort(value); err == nil {
+		parsed, _ := strconv.Atoi(port)
+		return parsed
+	}
+	return 0
 }
 
 func (h *TargetHandler) ListTargets(c *gin.Context) {
